@@ -1,6 +1,6 @@
 MIT License
 
-Copyright (c) 2025 CelestialSim
+Copyright (c) 2025 Alessandro La Conca (CelestialSim Project)
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -19,3 +19,13 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+ACKNOWLEDGMENTS:
+This software includes portions of code adapted from works by Inigo Quilez:
+- Ray intersection algorithms from https://iquilezles.org/articles/intersectors/
+
+This software also includes GLSL noise functions from the Ashima webgl-noise library:
+- Simplex noise implementation from https://github.com/ashima/webgl-noise
+
+Original works by Inigo Quilez are under MIT License © 2014 Inigo Quilez.
+Original works by Ashima Arts are under MIT License © 2011 Ashima Arts.
