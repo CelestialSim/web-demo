@@ -90,13 +90,8 @@ struct State {
 }
 
 float getDeltaT(){
-    return getdeltaTMs() / 1000;
+    return deltaTMs[0] / 1000;
 }
-
-float getdeltaTMs(){
-    return deltaTMs[0];
-}
-
 
 [playground::ZEROS(84*maxTris)]
 RWStructuredBuffer<Tris> t;
@@ -946,7 +941,7 @@ vec3 mod289(vec3 x) {
     return x - floor(x * (1.0 / 289.0)) * 289.0;
 }
   
-  vec4 mod289(vec4 x) {
+vec4 mod289(vec4 x) {
     return x - floor(x * (1.0 / 289.0)) * 289.0;
 }
   
