@@ -137,6 +137,296 @@ enum UI {
     AddWater
 }
 
+// App state deciding active showcase
+struct State {
+    uint nTris;
+    uint nVerts;
+    uint nTrisAdded;
+    float camDistance;
+    float rotationSpeed;
+    //float rotationMs;
+    UI activeShowcase;
+    bool_w showLodAnimation;
+    TrisPtr _pressedTris;
+    bool_w stopClickEvent; // Buttons do not pass click on planet
+    bool_w deleteWaterToggle;
+    float lastZoomTime; // Timestamp of last zoom operation
+    uint exampleTreeIdx; // Index of the example tree in GenShowcase mode (0 means no example tree)
+
+    // Needed Optionals can't be stored in a Buffer in webGPU
+    property Optional<TrisPtr> pressedTris {
+        get {
+            if (_pressedTris.idx == -1)
+                return none;
+            return _pressedTris;
+        }
+        set {
+            if (newValue.hasValue) {
+                _pressedTris = newValue.value;
+            } else {
+                _pressedTris = TrisPtr(-1);
+            }
+        }
+    }
+}
+
+// This helps with performance since we are not passing the whole tris stuct but only a pointer
+struct TrisPtr {
+    int idx;
+
+    property Tris tris {
+        get {
+            return t[idx];
+        }
+    }
+
+    property TrisPtr neigh_ab {
+        get {
+            return t[idx].neigh_ab;
+        }
+    }
+
+    property TrisPtr neigh_bc {
+        get {
+            return t[idx].neigh_bc;
+        }
+    }
+
+    property TrisPtr neigh_ca {
+        get {
+            return t[idx].neigh_ca;
+        }
+    }
+
+
+
+}
+
+
+struct TreePtr {
+    int idx = -1;
+
+    property Tris tris {
+        get {
+            return t[idx];
+        }
+    }
+
+    property Tree tree {
+        get {
+            return trees[idx];
+        }
+    }
+}
+
+
+
+struct Tris {
+    TrisPtr ptr;
+    uint3 abc;
+    bool_w divided;
+    bool_w to_div;
+    uint8_w ico_idx;
+    TrisPtr neigh_ab;
+    TrisPtr neigh_bc;
+    TrisPtr neigh_ca;
+    TrisPtr a_t;
+    TrisPtr b_t;
+    TrisPtr c_t;
+    TrisPtr center_t;
+    uint8_w lv;
+    SimValue sim;
+
+    property bool isPressed {
+        get {
+            return state[0].pressedTris.hasValue && state[0].pressedTris.value == ptr;
+        }
+    }
+
+    property vec3 normal {
+        get {
+
+            // Get the vertex positions using indices
+            vec3 v0 = vPos[abc.x];
+            vec3 v1 = vPos[abc.y];
+            vec3 v2 = vPos[abc.z];
+
+            // Calculate the normal using the cross product
+            return - normalize(cross(v1 - v0, v2 - v0));
+        }
+    }
+
+    property bool abNeightDivided {
+        get {
+            return neigh_ab.tris.divided == 1 || neigh_ab.tris.to_div == 1;
+        }
+    }
+    property bool bcNeightDivided {
+        get {
+            return neigh_bc.tris.divided == 1 || neigh_bc.tris.to_div == 1;
+        }
+    }
+    property bool caNeightDivided {
+        get {
+            return neigh_ca.tris.divided == 1 || neigh_ca.tris.to_div == 1;
+        }
+    }
+
+    TrisPtr counterClockWiseNeigh(TrisPtr posOrigin, TrisPtr angleOrigin){
+        if (posOrigin.neigh_ab == angleOrigin)
+            return posOrigin.neigh_ca;
+        else if (posOrigin.neigh_bc == angleOrigin)
+            return posOrigin.neigh_ab;
+        else return posOrigin.neigh_bc;
+    }
+
+
+    void getNeigths(out TrisPtr[13] neighs, TrisPtr centerNeigh) {
+        neighs[0] = centerNeigh;
+        // Add the starting neighbors at distance 1
+        neighs[1] = neigh_ab;
+        neighs[5] = neigh_bc;
+        neighs[9] = neigh_ca;
+
+        // Neighs at dist 2 and 3
+        neighs[2] = counterClockWiseNeigh(neighs[1],centerNeigh);
+        neighs[3] = counterClockWiseNeigh(neighs[2],neighs[1]);
+        neighs[4] = counterClockWiseNeigh(neighs[3],neighs[2]);
+
+        neighs[6] = counterClockWiseNeigh(neighs[5],centerNeigh);
+        neighs[7] = counterClockWiseNeigh(neighs[6],neighs[5]);
+        neighs[8] = counterClockWiseNeigh(neighs[7],neighs[6]);
+
+        neighs[10] = counterClockWiseNeigh(neighs[9],centerNeigh);
+        neighs[11] = counterClockWiseNeigh(neighs[10],neighs[9]);
+        neighs[12] = counterClockWiseNeigh(neighs[11],neighs[10]);
+        
+    }
+
+    property float3 center{
+        get {
+        var center = (vPos[abc.x] + vPos[abc.y] + vPos[abc.z])/3;
+        return center;
+        }
+    }
+
+    // From https://iquilezles.org/articles/intersectors/
+    Optional<TrisAndDist> intersect(vec3 ro, vec3 rd)
+    {
+        vec3 v0 = vPos[abc.x];
+        vec3 v1 = vPos[abc.y];
+        vec3 v2 = vPos[abc.z];
+
+        vec3 v1v0 = v1 - v0;
+        vec3 v2v0 = v2 - v0;
+        vec3 rov0 = ro - v0;
+        vec3  n = cross( v1v0, v2v0 );
+        vec3  q = cross( rov0, rd );
+        float d = 1.0/dot( rd, n );
+        float u = d*dot( -q, v2v0 );
+        float v = d*dot(  q, v1v0 );
+        float t = d*dot( -n, rov0 );
+        if( u<0.0 || v<0.0 || (u+v)>1.0 ) return none;
+        return TrisAndDist(ptr,t);
+    }
+
+    void updateSimValues(){
+        bool trisInitialized = sim.hasTree == true;
+
+        t[ptr.idx].sim.color = getColor();
+        if (trisInitialized)
+            return;
+        // Set colors
+
+        bool hasDetailedLod = lv >= maxDivLevel;
+        bool isValley = distance(center,float3(0)) < radius*1;
+
+        // Set triangle as water if it's in a valley (closer to center) and meets noise criteria
+        if (hasDetailedLod && isValley) {
+            t[ptr.idx].sim.hasWater = true; // Mark as water
+        }
+        
+        trees[ptr.idx] = Tree(ptr,0);
+        t[ptr.idx].sim.treePtr = TreePtr(ptr.idx);
+        t[ptr.idx].sim.hasTree = true;
+    }
+
+    float3 getColor() {
+
+        if (lv < maxDivLevel) {
+            var color = (a_t.tris.sim.color + b_t.tris.sim.color + c_t.tris.sim.color + center_t.tris.sim.color) / 4;
+            if (!float3(0).equals(color))
+                return color;
+        }
+
+        if (sim.hasWater == true){
+            return isPressed ?
+                float3(0.3, 0.5, 1.0):  // Brighter blue when pressed
+                float3(0.2, 0.4, 0.8);  // Normal water blue
+           
+        }
+
+        if (isPressed)
+            return float3(1, 0.2, 0.4);
+            
+        // Calculate height as distance from center (0,0,0) normalized by radius
+        float height = distance(center, float3(0)) / radius;
+        
+        // Colors based on height instead of LOD level
+        if (height < 1.01) {
+            // Lower areas (valleys) - darker green
+            return vec3(0.4, 0.61, 0.42)*0.8;
+        } else if (height < 1.04) {
+            // Middle areas - regular green
+            return vec3(0.4, 0.61, 0.42);
+        } else if (height < 1.07) {
+            // Higher areas - lighter green
+            return vec3(0.5, 0.7, 0.5);
+        } else {
+            // Peaks - brown/tan for mountain tops
+            return vec3(0.6, 0.52, 0.36);
+        }
+    }
+
+    // Similarity to another tris based on height, humidity, and terrain type
+    float similarity(TrisPtr other) {
+        // Calculate similarity based on height
+        float h1 = distance(center, float3(0));
+        float h2 = distance(other.tris.center, float3(0));
+        float heightDiff = 150*abs(h1 - h2);
+        float heightSim = 1.0 / (heightDiff + 1e-5); // avoid div by zero
+        heightSim = clamp(heightSim, 0.0, 1.0);
+        
+        // Calculate similarity based on humidity
+        float hum1 = sim.humidity;
+        float hum2 = other.tris.sim.humidity;
+        float humidityDiff = 8 * abs(hum1 - hum2);
+        float humiditySim = 1.0 - humidityDiff; // 1.0 is perfect match, 0.0 is maximum difference
+        humiditySim = clamp(humiditySim, 0.0, 1.0);
+        
+        // Calculate similarity based on the unified terrainFactor
+        float factor1 = sim.terrainFactor;
+        float factor2 = other.tris.sim.terrainFactor;
+        
+        // abs(factor1 - factor2) ranges from 0 (identical) to 2 (opposite extremes).
+        // Scale this difference to a 0-1 range for terrainTypeDiff.
+        float terrainTypeDiff = abs(factor1 - factor2) / 2.0f; 
+        float terrainTypeSim = 1.0f - terrainTypeDiff;
+        
+        // Combine all similarities with weights
+        const float heightWeight = 0.4;      // Weight for height similarity
+        const float humidityWeight = 0.3;    // Weight for humidity similarity
+        const float terrainTypeWeight = 0.3; // Weight for terrain type similarity
+        
+        float combinedSim = (heightWeight * heightSim) + 
+                        (humidityWeight * humiditySim) + 
+                        (terrainTypeWeight * terrainTypeSim);
+        
+        return combinedSim;
+    }
+
+}
+
 struct Tree {
     TrisPtr ptr;
     float3 pa;
@@ -298,14 +588,7 @@ struct SimValue {
     float3 color;
     TreePtr treePtr;
     bool_w hasTree;
-    bool_w isSelected;
-    bool_w isPressed; //Mouse is touching down on it
-
-    property bool isWater {
-        get {
-            return isSelected == true;
-        }
-    }
+    bool_w hasWater;
     
     property float humidity {
         get {                
@@ -313,11 +596,11 @@ struct SimValue {
             float humidityValue = 0.0f;
             TrisPtr ptr = TrisPtr(treePtr.idx);
             TrisPtr[13] neighs;
-            ptr.getNeigths(neighs, ptr);
+            ptr.tris.getNeigths(neighs, ptr);
             
             // Sum up contributions from water tiles in neighborhood
             for (var i = 0; i < neighs.getCount(); i++) {
-                if (neighs[i].tris.sim.isWater)
+                if (neighs[i].tris.sim.hasWater)
                     humidityValue += 1.0f/13.0f;
             }
             
@@ -335,10 +618,10 @@ struct SimValue {
                 return 0.0f; // Neutral for non-detailed or if treePtr is not set for this SimValue context
             }
 
-            float currentHeight = distance(ptr.center, float3(0));
+            float currentHeight = distance(ptr.tris.center, float3(0));
             
             // Calculate the center of the three direct neighbors
-            float3 center_of_neighbors = (ptr.neigh_ab.center + ptr.neigh_bc.center + ptr.neigh_ca.center) / 3.0f;
+            float3 center_of_neighbors = (ptr.neigh_ab.tris.center + ptr.neigh_bc.tris.center + ptr.neigh_ca.tris.center) / 3.0f;
             float dist_neighbor_center = distance(center_of_neighbors, float3(0));
             
             // Calculate scaled difference: positive for peak-like, negative for valley-like
@@ -347,281 +630,6 @@ struct SimValue {
             
             // Clamp to the range [-1.0, 1.0]
             return clamp(scaled_difference, -1.0f, 1.0f);
-        }
-    }
-}
-
-struct NeightsOthers
-{
-    const uint[] ab = { 2, 0, 2, 1, 2, 2, 1, 2, 1, 0, 2, 2, 2, 1, 2, 1, 0, 2, 2, 0 };
-    const uint[] bc = { 1, 1, 2, 1, 1, 0, 0, 2, 1, 1, 0, 1, 1, 1, 2, 0, 2, 0, 2, 0 };
-    const uint[] ca = { 1, 1, 2, 1, 2, 2, 1, 2, 1, 2, 2, 1, 1, 2, 2, 2, 1, 1, 1, 1 };
-}
-
-// App state deciding active showcase
-struct State {
-    uint nTris;
-    uint nVerts;
-    uint nTrisAdded;
-    float camDistance;
-    float rotationSpeed;
-    //float rotationMs;
-    UI activeShowcase;
-    bool_w showLodAnimation;
-    bool_w initialized;
-    TrisPtr pressedTris;
-    bool_w stopClickEvent; // Buttons do not pass click on planet
-    bool_w deleteWaterToggle;
-    float lastZoomTime; // Timestamp of last zoom operation
-    uint exampleTreeIdx; // Index of the example tree in GenShowcase mode (0 means no example tree)
-}
-
-
-struct TreePtr {
-    int idx = -1;
-
-    property Tris tris {
-        get {
-            return t[idx];
-        }
-    }
-
-    property Tree tree {
-        get {
-            return trees[idx];
-        }
-    }
-}
-
-// This helps with performance since we are not passing the whole tris stuct but only a pointer
-struct TrisPtr {
-    uint idx;
-
-    property Tris tris {
-        get {
-            return t[idx];
-        }
-    }
-
-    property TrisPtr neigh_ab {
-        get {
-            return t[idx].neigh_ab;
-        }
-    }
-
-    property TrisPtr neigh_bc {
-        get {
-            return t[idx].neigh_bc;
-        }
-    }
-
-    property TrisPtr neigh_ca {
-        get {
-            return t[idx].neigh_ca;
-        }
-    }
-
-
-    // From https://iquilezles.org/articles/intersectors/
-    Optional<TrisAndDist> intersect(vec3 ro, vec3 rd)
-    {
-        var tAbc = tris.abc;
-        vec3 v0 = vPos[tAbc.x];
-        vec3 v1 = vPos[tAbc.y];
-        vec3 v2 = vPos[tAbc.z];
-
-        vec3 v1v0 = v1 - v0;
-        vec3 v2v0 = v2 - v0;
-        vec3 rov0 = ro - v0;
-        vec3  n = cross( v1v0, v2v0 );
-        vec3  q = cross( rov0, rd );
-        float d = 1.0/dot( rd, n );
-        float u = d*dot( -q, v2v0 );
-        float v = d*dot(  q, v1v0 );
-        float t = d*dot( -n, rov0 );
-        if( u<0.0 || v<0.0 || (u+v)>1.0 ) return none;
-        return TrisAndDist(this,t);
-    }
-
-    void updateSimValues(){
-        bool triUnset = state[0].initialized == false || t[idx].sim.isSelected == false;
-        bool trisInitialized = t[idx].sim.hasTree == true;
-
-        t[idx].sim.color = getColor();
-        if (trisInitialized)
-            return;
-        // Set colors
-
-        bool hasDetailedLod = tris.lv >= maxDivLevel;
-        bool isValley = distance(center,float3(0)) < radius*1;
-
-        // Set triangle as water if it's in a valley (closer to center) and meets noise criteria
-        if (hasDetailedLod && isValley) {
-            t[idx].sim.isSelected = true; // Mark as water
-        }
-        
-        trees[idx] = Tree(this,0);
-        t[idx].sim.treePtr = TreePtr(idx);
-        t[idx].sim.hasTree = true;
-    }
-
-    TrisPtr counterClockWiseNeigh(TrisPtr posOrigin, TrisPtr angleOrigin){
-        if (posOrigin.neigh_ab == angleOrigin)
-            return posOrigin.neigh_ca;
-        else if (posOrigin.neigh_bc == angleOrigin)
-            return posOrigin.neigh_ab;
-        else return posOrigin.neigh_bc;
-    }
-
-
-    void getNeigths(out TrisPtr[13] neighs, TrisPtr centerNeigh) {
-        neighs[0] = centerNeigh;
-        // Add the starting neighbors at distance 1
-        neighs[1] = neigh_ab;
-        neighs[5] = neigh_bc;
-        neighs[9] = neigh_ca;
-
-        // Neighs at dist 2 and 3
-        neighs[2] = counterClockWiseNeigh(neighs[1],centerNeigh);
-        neighs[3] = counterClockWiseNeigh(neighs[2],neighs[1]);
-        neighs[4] = counterClockWiseNeigh(neighs[3],neighs[2]);
-
-        neighs[6] = counterClockWiseNeigh(neighs[5],centerNeigh);
-        neighs[7] = counterClockWiseNeigh(neighs[6],neighs[5]);
-        neighs[8] = counterClockWiseNeigh(neighs[7],neighs[6]);
-
-        neighs[10] = counterClockWiseNeigh(neighs[9],centerNeigh);
-        neighs[11] = counterClockWiseNeigh(neighs[10],neighs[9]);
-        neighs[12] = counterClockWiseNeigh(neighs[11],neighs[10]);
-        
-    }
-
-    property float3 center{
-        get {
-        var tAbc = tris.abc;
-        var center = (vPos[tAbc.x] + vPos[tAbc.y] + vPos[tAbc.z])/3;
-        return center;
-        }
-    }
-
-    float3 getColor() {
-
-            if (tris.lv < maxDivLevel) {
-                var color = (tris.a_t.tris.sim.color + tris.b_t.tris.sim.color + tris.c_t.tris.sim.color + tris.center_t.tris.sim.color) / 4;
-                if (!float3(0).equals(color))
-                    return color;
-            }
-
-            if (tris.sim.isSelected == true){
-                return tris.sim.isPressed == true ?
-                    float3(0.3, 0.5, 1.0) :  // Brighter blue when pressed
-                    float3(0.2, 0.4, 0.8)    // Normal water blue
-                ;
-            }
-
-            if (tris.sim.isPressed == true)
-                return float3(1, 0.2, 0.4);
-                
-            // Calculate height as distance from center (0,0,0) normalized by radius
-            float height = distance(center, float3(0)) / radius;
-            
-            // Colors based on height instead of LOD level
-            if (height < 1.01) {
-                // Lower areas (valleys) - darker green
-                return vec3(0.4, 0.61, 0.42)*0.8;
-            } else if (height < 1.04) {
-                // Middle areas - regular green
-                return vec3(0.4, 0.61, 0.42);
-            } else if (height < 1.07) {
-                // Higher areas - lighter green
-                return vec3(0.5, 0.7, 0.5);
-            } else {
-                // Peaks - brown/tan for mountain tops
-                return vec3(0.6, 0.52, 0.36);
-            }
-        }
-
-    // Similarity to another tris based on height, humidity, and terrain type
-    float similarity(TrisPtr other) {
-        // Calculate similarity based on height
-        float h1 = distance(center, float3(0));
-        float h2 = distance(other.center, float3(0));
-        float heightDiff = 150*abs(h1 - h2);
-        float heightSim = 1.0 / (heightDiff + 1e-5); // avoid div by zero
-        heightSim = clamp(heightSim, 0.0, 1.0);
-        
-        // Calculate similarity based on humidity
-        float hum1 = tris.sim.humidity;
-        float hum2 = other.tris.sim.humidity;
-        float humidityDiff = 8 * abs(hum1 - hum2);
-        float humiditySim = 1.0 - humidityDiff; // 1.0 is perfect match, 0.0 is maximum difference
-        humiditySim = clamp(humiditySim, 0.0, 1.0);
-        
-        // Calculate similarity based on the unified terrainFactor
-        float factor1 = tris.sim.terrainFactor;
-        float factor2 = other.tris.sim.terrainFactor;
-        
-        // abs(factor1 - factor2) ranges from 0 (identical) to 2 (opposite extremes).
-        // Scale this difference to a 0-1 range for terrainTypeDiff.
-        float terrainTypeDiff = abs(factor1 - factor2) / 2.0f; 
-        float terrainTypeSim = 1.0f - terrainTypeDiff;
-        
-        // Combine all similarities with weights
-        const float heightWeight = 0.4;      // Weight for height similarity
-        const float humidityWeight = 0.3;    // Weight for humidity similarity
-        const float terrainTypeWeight = 0.3; // Weight for terrain type similarity
-        
-        float combinedSim = (heightWeight * heightSim) + 
-                           (humidityWeight * humiditySim) + 
-                           (terrainTypeWeight * terrainTypeSim);
-        
-        return combinedSim;
-    }
-
-}
-
-
-struct Tris {
-    uint3 abc;
-    bool_w divided;
-    bool_w to_div;
-    uint8_w ico_idx;
-    TrisPtr neigh_ab;
-    TrisPtr neigh_bc;
-    TrisPtr neigh_ca;
-    TrisPtr a_t;
-    TrisPtr b_t;
-    TrisPtr c_t;
-    TrisPtr center_t;
-    uint8_w lv;
-    SimValue sim;
-
-    property vec3 normal {
-        get {
-
-            // Get the vertex positions using indices
-            vec3 v0 = vPos[abc.x];
-            vec3 v1 = vPos[abc.y];
-            vec3 v2 = vPos[abc.z];
-
-            // Calculate the normal using the cross product
-            return - normalize(cross(v1 - v0, v2 - v0));
-        }
-    }
-
-    property bool abNeightDivided {
-        get {
-            return neigh_ab.tris.divided == 1 || neigh_ab.tris.to_div == 1;
-        }
-    }
-    property bool bcNeightDivided {
-        get {
-            return neigh_bc.tris.divided == 1 || neigh_bc.tris.to_div == 1;
-        }
-    }
-    property bool caNeightDivided {
-        get {
-            return neigh_ca.tris.divided == 1 || neigh_ca.tris.to_div == 1;
         }
     }
 }
@@ -636,6 +644,13 @@ struct Camera {
        }
        return rotate(initialCameraPos+float3(0,0,state[0].camDistance),false);
    }
+}
+
+struct NeightsOthers
+{
+    const uint[] ab = { 2, 0, 2, 1, 2, 2, 1, 2, 1, 0, 2, 2, 2, 1, 2, 1, 0, 2, 2, 0 };
+    const uint[] bc = { 1, 1, 2, 1, 1, 0, 0, 2, 1, 1, 0, 1, 1, 1, 2, 0, 2, 0, 2, 0 };
+    const uint[] ca = { 1, 1, 2, 1, 2, 2, 1, 2, 1, 2, 2, 1, 1, 2, 2, 2, 1, 1, 1, 1 };
 }
 
 struct Button {
@@ -1012,24 +1027,20 @@ void handleClick(vec3 ro, vec3 rd, bool mouseDown) {
         if (prt.tris.lv < maxDivLevel) {
             return;
         }
-        if (state[0].pressedTris != trisPtr){
+        // If the same triangle as before is being pressed
+        if (state[0].pressedTris.hasValue && state[0].pressedTris.value != trisPtr){
             // Move away
-            t[state[0].pressedTris.idx].sim.isPressed = false;
+            state[0].pressedTris = none;
         }
         if (mouseDown) {      
-            if (t[trisPtr.idx].sim.isPressed == true)
+            if (state[0].pressedTris.hasValue)
                 return; // Only pressed once
             // On click down 
-            t[trisPtr.idx].sim.isSelected = !state[0].deleteWaterToggle;
-            t[trisPtr.idx].sim.isPressed = true;
+            t[trisPtr.idx].sim.hasWater = !state[0].deleteWaterToggle;
             state[0].pressedTris = trisPtr;
         }
         else { // On click up 
-            //if (t[hit.ptr.idx].sim.isSelected == true)
-            //{
-            //    t[hit.ptr.idx].sim.isSelected = false;
-            //}
-            t[trisPtr.idx].sim.isPressed = false;
+            state[0].pressedTris = none;
         }
     }
 }
@@ -1043,6 +1054,12 @@ uint4 add_triangles(TrisPtr parent, int3 abc, int3 v_idx, TrisPtr divTris) {
     t[t_idx.y].abc = int3(v_idx.x, abc.y, v_idx.y);
     t[t_idx.z].abc = int3(v_idx.z, v_idx.y, abc.z);
     t[t_idx.w].abc = int3(v_idx.y, v_idx.z, v_idx.x);
+
+    // Add indexes
+    t[t_idx.x].ptr = TrisPtr(t_idx.x);
+    t[t_idx.y].ptr = TrisPtr(t_idx.y);
+    t[t_idx.z].ptr = TrisPtr(t_idx.z);
+    t[t_idx.w].ptr = TrisPtr(t_idx.w);
 
     // Set ico_idx
     t[t_idx.x].ico_idx = parent.tris.ico_idx;
@@ -1268,19 +1285,19 @@ TrisAndDist nearestSubtris(TrisAndDist trisAndDist, vec3 ro, vec3 rd) {
     //projecting on triangle surface, to be more precise we can use sphere or continious noise
     var pos = trisAndDist.hitPos(ro,rd);
     var trisA = tris.a_t;
-    var minTrisAndDist = TrisAndDist(trisA,distance(trisA.center,pos));
+    var minTrisAndDist = TrisAndDist(trisA,distance(trisA.tris.center,pos));
 
     // Check triangle B
     var trisB = tris.b_t;
-    var bTrisAndDist = TrisAndDist(trisB,distance(trisB.center,pos));
+    var bTrisAndDist = TrisAndDist(trisB,distance(trisB.tris.center,pos));
 
     // Check triangle C
     var trisC = tris.c_t;
-    var cTrisAndDist = TrisAndDist(trisC,distance(trisC.center,pos));
+    var cTrisAndDist = TrisAndDist(trisC,distance(trisC.tris.center,pos));
 
     // Check triangle Center
     var trisCenter = tris.center_t;
-    var centerTrisAndDist = TrisAndDist(trisCenter,distance(trisCenter.center,pos));
+    var centerTrisAndDist = TrisAndDist(trisCenter,distance(trisCenter.tris.center,pos));
 
     if (bTrisAndDist.dist < minTrisAndDist.dist){
         minTrisAndDist = bTrisAndDist;
@@ -1297,14 +1314,14 @@ TrisAndDist nearestSubtris(TrisAndDist trisAndDist, vec3 ro, vec3 rd) {
 
 Optional<TrisAndDist> refineNearestFromNeigh(TrisAndDist minTris, vec3 ro, vec3 rd) {
 
-    Optional<TrisAndDist> minTrisAndDist = minTris.ptr.intersect(ro,rd);
+    Optional<TrisAndDist> minTrisAndDist = minTris.ptr.tris.intersect(ro,rd);
     // Calculate distance from neight to fix holes
 
     TrisPtr[13] neighs;
-    minTris.ptr.getNeigths(neighs, minTris.ptr);
+    minTris.ptr.tris.getNeigths(neighs, minTris.ptr);
 
     for (var i = 0; i < neighs.getCount(); i++) {
-        Optional<TrisAndDist> trisAndDist = neighs[i].intersect(ro,rd);
+        Optional<TrisAndDist> trisAndDist = neighs[i].tris.intersect(ro,rd);
         if (trisAndDist.hasValue){
             if (!minTrisAndDist.hasValue || minTrisAndDist.hasValue && trisAndDist.value.dist < minTrisAndDist.value.dist)
                 minTrisAndDist = trisAndDist.value;
@@ -1333,7 +1350,7 @@ Optional<TrisAndDist> icoIntersect(float3 ro, float3 rd)
     var atmHitPos = atmIntersect.value.hitPos(ro,rd);
 
     Optional<TrisAndDist> minTris = none;
-    TrisAndDist minAtmoTris = TrisAndDist(TrisPtr(0),distance(TrisPtr(0).center,atmHitPos));;
+    TrisAndDist minAtmoTris = TrisAndDist(TrisPtr(0),distance(TrisPtr(0).tris.center,atmHitPos));;
 
     // Find best starting tris using distance
     //[ForceUnroll]
@@ -1341,13 +1358,13 @@ Optional<TrisAndDist> icoIntersect(float3 ro, float3 rd)
     for (int i = 20; i < 100; i++) {
         bool forwardFacing = dot(t[i].normal,cameraPos) > 0;
         if (forwardFacing){
-            var tris = TrisPtr(i).intersect(ro,rd);
+            var tris = TrisPtr(i).tris.intersect(ro,rd);
             if (tris.hasValue){
                 if (!minTris.hasValue || minTris.hasValue && tris.value.dist < minTris.value.dist)
                     minTris = tris;
             }
             var trisPtr = TrisPtr(i);
-            var tris1 = TrisAndDist(trisPtr,distance(trisPtr.center,atmHitPos));
+            var tris1 = TrisAndDist(trisPtr,distance(trisPtr.tris.center,atmHitPos));
             if (tris1.dist < minAtmoTris.dist)
                 minAtmoTris = tris1;
         }
@@ -1412,7 +1429,7 @@ Optional<TrisAndDist> icoIntersect(float3 ro, float3 rd)
 }
 
 TrisAndDist trisAndDistFromCenter(TrisPtr tr){
-    var dist = distance(tr.center,Camera.pos());
+    var dist = distance(tr.tris.center,Camera.pos());
     return TrisAndDist(tr,dist);
 }
 
@@ -1460,10 +1477,10 @@ void makeTris(uint2 dispatchThreadId : SV_DispatchThreadID)
 
     // # Set simulation values
     //calculate colors
-    TrisPtr(t_idx.x).updateSimValues();
-    TrisPtr(t_idx.y).updateSimValues();
-    TrisPtr(t_idx.z).updateSimValues();
-    TrisPtr(t_idx.w).updateSimValues();
+    TrisPtr(t_idx.x).tris.updateSimValues();
+    TrisPtr(t_idx.y).tris.updateSimValues();
+    TrisPtr(t_idx.z).tris.updateSimValues();
+    TrisPtr(t_idx.w).tris.updateSimValues();
 
     // set to_div flag
     // Doing this at the end solves flickering
@@ -1473,7 +1490,6 @@ void makeTris(uint2 dispatchThreadId : SV_DispatchThreadID)
 }
 
 void increaseTris(uint2 dispatchThreadId : SV_DispatchThreadID){
-    //if (state[0].initialized == 1) return;
     if (dispatchThreadId.x > 0)
         return;
     if (state[0].nTris == initialNTris)
@@ -1508,7 +1524,6 @@ void createExampleTree() {
 [numthreads(12, 1, 1)]
 void initVerts(uint2 dispatchThreadId : SV_DispatchThreadID)
 {
-    //if (state[0].initialized == 1) return;
     uint idx = dispatchThreadId.x;
     if (idx >= initialNVerts)
         return;
@@ -1540,7 +1555,6 @@ void initVerts(uint2 dispatchThreadId : SV_DispatchThreadID)
 [numthreads(20, 1, 1)]
 void initTris(uint2 dispatchThreadId : SV_DispatchThreadID)
 {
-    //if (state[0].initialized == 1) return;
     uint idx = dispatchThreadId.x;
     if (idx >= initialNTris) { 
         // Reset triangle
@@ -1574,6 +1588,7 @@ void initTris(uint2 dispatchThreadId : SV_DispatchThreadID)
     TrisPtr[] tNeightBc = { 4, 2, 3, 7, 5, 15, 10, 6, 9, 10, 6, 15, 13, 14, 15, 5, 13, 19, 8, 17 };
     TrisPtr[] tNeightCa = { 14, 0, 1, 4, 0, 4, 5, 3, 7, 8, 9, 10, 11, 12, 13, 11, 17, 18, 2, 12 };
 
+    t[idx].ptr = TrisPtr(idx);
     t[idx].abc = coreTAbc[idx];
     // Add an index for icosphere face
     t[idx].ico_idx = idx;
@@ -1604,7 +1619,6 @@ void init(uint2 dispatchThreadId : SV_DispatchThreadID)
     rotationMs[0] = timeFromStart * 1000;
     state[0].lastZoomTime = 0.0; // Initialize lastZoomTime
     state[0].exampleTreeIdx = initalExampleTreeIdx; // Initialize example tree index to 0 (no example tree)
-    state[0].initialized = true;
 }
 
 //Lv 1
@@ -1677,10 +1691,10 @@ void treeSimStep(uint2 dispatchThreadId : SV_DispatchThreadID)
     if (idx == state[0].exampleTreeIdx || ptr.tris.lv < maxDivLevel) return;
     TrisPtr examplePtr = TrisPtr(state[0].exampleTreeIdx);
     float low_cutoff_threshold = 0.1;
-    float sim = ptr.similarity(examplePtr);
+    float sim = ptr.tris.similarity(examplePtr);
     // Scale trees smoothly based on similarity (0 = no tree, 1 = full size)
     float targetScale = low_cutoff_threshold > sim ? 0.0 : sim;
-    if (ptr.tris.sim.isWater)
+    if (ptr.tris.sim.hasWater)
         targetScale = 0.0;
     // float targetScale = (sim > threshold) ? 1.0 : 0.0;
     float prevScale = trees[idx].scale;
@@ -1786,7 +1800,7 @@ float4 imageMain(uint2 dispatchThreadID, int2 screenSize)
                 col = triAndD.tris.sim.color * clamp( (dot(nor,lig)+1)/2, 0, 1.0 );
                 
                 // Add a subtle shimmer effect to water
-                if (triAndD.tris.sim.isWater) {
+                if (triAndD.tris.sim.hasWater) {
                     // Add time-based shimmer using sine waves
                     float shimmer = 0.1 * sin(timeFromStart * 3.0 + dot(pos, float3(1.0, 2.0, 3.0)) * 5.0);
                     col += float3(0.05, 0.1, 0.15) * shimmer;
