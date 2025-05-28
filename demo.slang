@@ -16,6 +16,9 @@
 
 import playground;
 
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║ 🪐 Aliases                                                                   ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
 typealias vec2 = float2;
 typealias vec3 = float3;
 typealias vec4 = float4;
@@ -26,7 +29,9 @@ typealias mat2 = matrix<float,2,2>;
 typealias bool_w = uint;
 typealias uint8_w = uint;
 
-
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║ 🪐 Constants                                                                 ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
 static const uint initialNTris = 20;
 static const uint initialNVerts = 12;
 static const float minCamDist = -1.3;
@@ -49,7 +54,17 @@ static const uint maxTris = 6820;
 static const uint maxVerts = 5112;
 
 static const uint maxDivLevel = 4;
+// Constants
+static const float3 initialCameraPos = vec3(0,0,3);
+static const bool activateNoise = true; //Default: true
+static const float max_tri_size = 0.26;  //Default: 0.3
+static const float radius = 1;
+[playground::MOUSE_POSITION]
+uniform float4 mousePosition;
 
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║ 🪐 Buffers                                                                   ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
 [playground::TIME]
 uniform float timeFromStart;
 
@@ -59,17 +74,289 @@ RWStructuredBuffer<float> rotationMs;
 [playground::ZEROS(1)]
 RWStructuredBuffer<float> deltaTMs;
 
-[playground::MOUSE_POSITION]
-uniform float4 mousePosition;
 
-// Constants
-static const float3 initialCameraPos = vec3(0,0,3);
-static const bool activateNoise = true; //Default: true
-static const float max_tri_size = 0.26;  //Default: 0.3
-static const float radius = 1;
+[playground::ZEROS(84*maxTris)]
+RWStructuredBuffer<Tris> t;
+
+[playground::ZEROS(52*maxTris)]
+RWStructuredBuffer<Tree> trees;
+
+[playground::ZEROS(4*maxVerts)]
+RWStructuredBuffer<float3> vPos;
+
 
 [playground::ZEROS(1)]
 RWStructuredBuffer<State> state;
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║ 🪐 Operators                                                                 ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+bool operator==(TrisPtr v0, TrisPtr v1)
+{
+    return v0.idx == v1.idx;
+}
+
+bool operator!=(TrisPtr v0, TrisPtr v1)
+{
+    return v0.idx != v1.idx;
+}
+
+bool operator==(bool_w a, bool operand) {
+    return a == (operand ? 1 : 0);
+}
+
+bool operator==(bool operand, bool_w a) {
+    return a == (operand ? 1 : 0);
+}
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║ 🪐 Structs                                                                   ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+enum Edge
+{
+    ab,
+    bc,
+    ca
+}
+
+enum Subtris
+{
+    a,
+    b,
+    c
+}
+
+enum UI {
+    LODShowcase,
+    SimShowcase,
+    GenShowcase,
+    IncreaseZoom,
+    DecreaseZoom,
+    DeleteWater,
+    AddWater
+}
+
+struct Tree {
+    TrisPtr ptr;
+    float3 pa;
+    float3 pb;
+    float ra;
+    float rb;
+    float scale;
+    
+    property bool isExampleTree {
+        get {
+            return ptr.idx == state[0].exampleTreeIdx;
+        }
+    }
+    
+    __init(TrisPtr tr, float _scale){
+        ptr = tr;
+        scale = _scale;
+        var trisAbc = ptr.tris.abc;
+        float3 vertA = vPos[trisAbc.x];
+        float3 vertB = vPos[trisAbc.y];
+        float3 vertC = vPos[trisAbc.z];
+
+        // Generate two random values using the hash function
+        float r1 = hash(vertA);
+        float r2 = hash(vertB);
+
+        // Convert random values to barycentric coordinates for uniform sampling
+        float u = 1.0 - sqrt(r1);
+        float v = sqrt(r1) * (1.0 - r2);
+        float w = sqrt(r1) * r2;
+
+        // Calculate the position of the tree based on barycentric coordinates
+        pa = u * vertA + v * vertB + w * vertC;
+        //pa = centerOfTris(tr);
+        pb = pa + normalize(pa) * 0.1 * scale;
+        ra = 0.03 * scale;
+        rb = 0.01 * scale;
+    }
+
+    __init(TrisPtr tr){
+        var trisAbc = tr.tris.abc;
+        float3 vertC = vPos[trisAbc.z];
+
+        float r3 = hash(vertC);
+        float scale = (r3/4)+0.3;
+
+        return Tree(tr, scale);
+    }
+    
+    property float3 treeColor {
+        get {
+            float3 baseColor = isExampleTree ? float3(1.0, 0.2, 0.2) : float3(0.4, 0.61, 0.42);
+            // Add slight variation based on position hash
+            float variation = 0.5 * (hash(pa) - 0.5); // range ~[-0.035, 0.035]
+            return baseColor + float3(variation, 0, 0);
+        }
+    }
+
+    // From https://iquilezles.org/articles/intersectors/
+    Optional<TrisAndDist> intersect(in vec3 ro, in vec3 rd)
+    {
+        vec3  ba = pb - pa;
+        vec3  oa = ro - pa;
+        vec3  ob = ro - pb;
+        float rr = ra - rb;
+        float m0 = dot(ba,ba);
+        float m1 = dot(ba,oa);
+        float m2 = dot(ba,rd);
+        float m3 = dot(rd,oa);
+        float m5 = dot(oa,oa);
+        float m6 = dot(ob,rd);
+        float m7 = dot(ob,ob);
+        
+        // body
+        float d2 = m0-rr*rr;
+        float k2 = d2    - m2*m2;
+        float k1 = d2*m3 - m1*m2 + m2*rr*ra;
+        float k0 = d2*m5 - m1*m1 + m1*rr*ra*2.0 - m0*ra*ra;
+        float h = k1*k1 - k0*k2;
+        if( h<0.0) return none;
+        float t = (-sqrt(h)-k1)/k2;
+    //if( t<0.0 ) return vec4(-1.0);
+        float y = m1 - ra*rr + t*m2;
+        if( y>0.0 && y<d2 ) return TrisAndDist(ptr,t,Object.Tree,normalize(d2*(oa+t*rd)-ba*y));
+        //if( y>0.0 && y<d2 ) return vec4(t, normalize(d2*(oa+t*rd)-ba*y));
+
+
+        // caps
+        float h1 = m3*m3 - m5 + ra*ra;
+        float h2 = m6*m6 - m7 + rb*rb;
+        if( max(h1,h2)<0.0 ) return none;
+        vec4 r = vec4(1e20);
+        if( h1>0.0 )
+        {        
+            t = -m3 - sqrt( h1 );
+            r = vec4( t, (oa+t*rd)/ra );
+        }
+        if( h2>0.0 )
+        {
+            t = -m6 - sqrt( h2 );
+            if( t<r.x )
+            r = vec4( t, (ob+t*rd)/rb );
+        }
+        return TrisAndDist(ptr,r.x,Object.Tree,r.yzw);
+    }
+}
+
+struct Atmosphere{
+    float3 origin;
+    float radius;
+
+    // From https://iquilezles.org/articles/intersectors/
+    Optional<TrisAndDist> intersectSphere(vec3 ro,vec3 rd)
+    {
+        vec3 oc = ro - origin;
+        float b = dot( oc, rd );
+        float c = dot( oc, oc ) - radius*radius;
+        float h = b*b - c;
+        if( h<0.0 ) return none;
+        var dist = -b - sqrt( h );
+        return TrisAndDist(TrisPtr(0),dist,Object.Atmosphere,sphNormal(ro + dist*rd));
+    }
+
+    // Modified from https://iquilezles.org/articles/intersectors/
+    Optional<TrisAndDist> intersect(vec3 ro, vec3 rd) {
+        vec3 oc = ro - origin; // Vector from the ray origin to the sphere center
+        oc = oc*0.95; //Show the circle a bit closer to the camera
+
+        float b = dot(oc, rd); // Dot product of oc and ray direction
+        if (b == 0.0) {
+            // The ray origin lies on the plane perpendicular to rd through the sphere center
+            return none;
+        }
+
+        float dist = -b / dot(rd, rd); // Solve for distance to intersection
+
+        if (dist < 0.0) {
+            // Intersection is behind the ray origin
+            return none;
+        }
+
+        return TrisAndDist(
+            TrisPtr(0), 
+            dist, 
+            Object.Atmosphere, 
+            sphNormal(ro + dist * rd)
+        );
+    }
+
+
+    vec3 sphNormal(vec3 hitPos)
+    {
+        return normalize(hitPos-origin);
+    }
+
+}
+
+struct SimValue {
+    float3 color;
+    TreePtr treePtr;
+    bool_w hasTree;
+    bool_w isSelected;
+    bool_w isPressed; //Mouse is touching down on it
+
+    property bool isWater {
+        get {
+            return isSelected == true;
+        }
+    }
+    
+    property float humidity {
+        get {                
+            // Get neighbors and calculate humidity based on water presence
+            float humidityValue = 0.0f;
+            TrisPtr ptr = TrisPtr(treePtr.idx);
+            TrisPtr[13] neighs;
+            ptr.getNeigths(neighs, ptr);
+            
+            // Sum up contributions from water tiles in neighborhood
+            for (var i = 0; i < neighs.getCount(); i++) {
+                if (neighs[i].tris.sim.isWater)
+                    humidityValue += 1.0f/13.0f;
+            }
+            
+            return humidityValue;
+        }
+    }
+    
+    // Terrain is a peak 1 or a valley -1
+    property float terrainFactor {
+        get {
+            TrisPtr ptr = TrisPtr(treePtr.idx);
+            
+            // Only calculate for detailed triangles
+            if (ptr.tris.lv < maxDivLevel) {
+                return 0.0f; // Neutral for non-detailed or if treePtr is not set for this SimValue context
+            }
+
+            float currentHeight = distance(ptr.center, float3(0));
+            
+            // Calculate the center of the three direct neighbors
+            float3 center_of_neighbors = (ptr.neigh_ab.center + ptr.neigh_bc.center + ptr.neigh_ca.center) / 3.0f;
+            float dist_neighbor_center = distance(center_of_neighbors, float3(0));
+            
+            // Calculate scaled difference: positive for peak-like, negative for valley-like
+            float height_difference = currentHeight - dist_neighbor_center;
+            float scaled_difference = height_difference * 400; // Using the 0.05 scaling factor
+            
+            // Clamp to the range [-1.0, 1.0]
+            return clamp(scaled_difference, -1.0f, 1.0f);
+        }
+    }
+}
+
+struct NeightsOthers
+{
+    const uint[] ab = { 2, 0, 2, 1, 2, 2, 1, 2, 1, 0, 2, 2, 2, 1, 2, 1, 0, 2, 2, 0 };
+    const uint[] bc = { 1, 1, 2, 1, 1, 0, 0, 2, 1, 1, 0, 1, 1, 1, 2, 0, 2, 0, 2, 0 };
+    const uint[] ca = { 1, 1, 2, 1, 2, 2, 1, 2, 1, 2, 2, 1, 1, 2, 2, 2, 1, 1, 1, 1 };
+}
 
 // App state deciding active showcase
 struct State {
@@ -89,18 +376,6 @@ struct State {
     uint exampleTreeIdx; // Index of the example tree in GenShowcase mode (0 means no example tree)
 }
 
-float getDeltaT(){
-    return deltaTMs[0] / 1000;
-}
-
-[playground::ZEROS(84*maxTris)]
-RWStructuredBuffer<Tris> t;
-
-[playground::ZEROS(52*maxTris)]
-RWStructuredBuffer<Tree> trees;
-
-[playground::ZEROS(4*maxVerts)]
-RWStructuredBuffer<float3> vPos;
 
 struct TreePtr {
     int idx = -1;
@@ -305,24 +580,6 @@ struct TrisPtr {
 
 }
 
-bool operator==(TrisPtr v0, TrisPtr v1)
-{
-    return v0.idx == v1.idx;
-}
-
-bool operator!=(TrisPtr v0, TrisPtr v1)
-{
-    return v0.idx != v1.idx;
-}
-
-bool operator==(bool_w a, bool operand) {
-    return a == (operand ? 1 : 0);
-}
-
-bool operator==(bool operand, bool_w a) {
-    return a == (operand ? 1 : 0);
-}
-
 
 struct Tris {
     uint3 abc;
@@ -369,250 +626,271 @@ struct Tris {
     }
 }
 
+struct Camera {
+    static float3 pos() {
+       // Animate Cam distance
+       float t = (sin(timeFromStart/2) + 1) * 0.5;
+       float animatedDist = lerp(minCamDist, maxCamDist, t);
+       if (state[0].showLodAnimation == 1){
+           state[0].camDistance = animatedDist;
+       }
+       return rotate(initialCameraPos+float3(0,0,state[0].camDistance),false);
+   }
+}
+
+struct Button {
+    uint2 bottomLeft;
+    uint size;
+    UI id;
+
+    bool intersect(uint2 pos) {
+        if (hidden)
+            return false;
+        int radius = 7;
+        if (pos.x >= bottomLeft.x + radius && pos.x <= bottomLeft.x + size - radius &&
+            pos.y >= bottomLeft.y && pos.y <= bottomLeft.y + size) {
+            return true;
+        }
+        
+        if (pos.y >= bottomLeft.y + radius && pos.y <= bottomLeft.y + size - radius &&
+            pos.x >= bottomLeft.x && pos.x <= bottomLeft.x + size) {
+            return true;
+        }
+
+        int2 cornerCenters[4] = {
+            {bottomLeft.x + radius, bottomLeft.y + radius},
+            {bottomLeft.x + size - radius, bottomLeft.y + radius}, 
+            {bottomLeft.x + radius, bottomLeft.y + size - radius},
+            {bottomLeft.x + size - radius, bottomLeft.y + size - radius}
+        };
+
+        for (int i = 0; i < 4; i++) {
+            int dx = pos.x - cornerCenters[i].x;
+            int dy = pos.y - cornerCenters[i].y;
+            if (dx * dx + dy * dy <= radius * radius) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    property bool hidden {
+        get {
+            switch (state[0].activeShowcase) {
+            case UI.SimShowcase:
+                return id == UI.DecreaseZoom || id == UI.IncreaseZoom;
+            default:
+                return id == UI.DeleteWater || id == UI.AddWater;
+            }
+        }
+    }
+
+    bool drawRectangle(uint2 fragCoord, uint2 offset, uint2 rectSize) {
+        return fragCoord.x >= bottomLeft.x + offset.x 
+            && fragCoord.y >= bottomLeft.y + offset.y
+            && fragCoord.x <= bottomLeft.x + offset.x + rectSize.x
+            && fragCoord.y <= bottomLeft.y + offset.y + rectSize.y;
+    }
+
+    bool drawPlus(uint2 fragCoord) {
+        const uint padding = 8;
+        const uint thickness = 7;
+        // Horizontal bar
+        if (drawRectangle(fragCoord, uint2(padding, size/2 - thickness/2), uint2(size-2*padding, thickness))) return true;
+        // Vertical bar
+        if (drawRectangle(fragCoord, uint2(size/2 - thickness/2, padding), uint2(thickness, size-2*padding))) return true;
+        return false;
+    }
+
+    bool drawX(uint2 fragCoord) {
+        const uint padding = 6;
+        const uint thickness = 9;
+        
+        // Convert to local coordinates
+        float2 local = float2(fragCoord - bottomLeft);
+        local -= float2(size/2); // Center at origin
+        
+        // Rotate coordinates by +45 and -45 degrees
+        float angle = 0.785398; // 45 degrees in radians
+        float2x2 rotPos = float2x2(
+            cos(angle), -sin(angle),
+            sin(angle), cos(angle)
+        );
+        float2x2 rotNeg = float2x2(
+            cos(-angle), -sin(-angle),
+            sin(-angle), cos(-angle)
+        );
+        
+        float2 rot1 = mul(rotPos, local);
+        float2 rot2 = mul(rotNeg, local);
+        
+        // Check if point is within either rotated rectangle
+        float halfLength = (size - 2*padding) / 2;
+        bool inRect1 = abs(rot1.x) < halfLength && abs(rot1.y) < thickness/2;
+        bool inRect2 = abs(rot2.x) < halfLength && abs(rot2.y) < thickness/2;
+        
+        return inRect1 || inRect2;
+    }
+
+    bool drawMinus(uint2 fragCoord) {
+        const uint padding = 8;
+        const uint thickness = 7;
+        // Horizontal bar only
+        return drawRectangle(fragCoord, uint2(padding, size/2 - thickness/2), uint2(size-2*padding, thickness));
+    }
+
+    bool drawRomanI(uint2 fragCoord) {
+        const uint padding = 12;
+        const uint thickness = 7;
+        return drawRectangle(fragCoord, uint2(size/2 - thickness/2, padding), uint2(thickness, size-2*padding));
+    }
+
+    bool drawRomanII(uint2 fragCoord) {
+        const uint padding = 12;
+        const uint thickness = 7;
+        const uint spacing = 10;
+        if (drawRectangle(fragCoord, uint2(size/2 - spacing - thickness/2, padding), uint2(thickness, size-2*padding))) return true;
+        if (drawRectangle(fragCoord, uint2(size/2 + spacing - thickness/2, padding), uint2(thickness, size-2*padding))) return true;
+        return false;
+    }
+
+    bool drawRomanIII(uint2 fragCoord) {
+        const uint padding = 12;
+        const uint thickness = 7;
+        const uint spacing = 10;
+        if (drawRectangle(fragCoord, uint2(size/2 - spacing*1.5 - thickness/2, padding), uint2(thickness, size-2*padding))) return true;
+        if (drawRectangle(fragCoord, uint2(size/2 - thickness/2, padding), uint2(thickness, size-2*padding))) return true;
+        if (drawRectangle(fragCoord, uint2(size/2 + spacing*1.5 - thickness/2, padding), uint2(thickness, size-2*padding))) return true;
+        return false;
+    }
+
+    void onPress() {
+        state[0].stopClickEvent = true;
+        
+        // Current time in milliseconds
+        float currentTime = timeFromStart * 1000.0;
+        
+        // Minimum time between zoom operations (in milliseconds)
+        const float zoomThrottleTime = 16.0; // ~60fps rate
+        
+        switch (id) {
+            case UI.IncreaseZoom:
+                state[0].showLodAnimation = false;
+                
+                // Only perform zoom if enough time has passed since last zoom
+                if (currentTime - state[0].lastZoomTime >= zoomThrottleTime) {
+                    // Use a fixed zoom amount that's independent of triangle count
+                    // Base speed is 0.1 units per second
+                    float zoomAmount = 0.8 * (zoomThrottleTime / 1000.0); 
+                    state[0].camDistance = max(state[0].camDistance - zoomAmount, minCamDist);
+                    
+                    // Update last zoom time
+                    state[0].lastZoomTime = currentTime;
+                }
+                break;
+            case UI.DecreaseZoom:
+                state[0].showLodAnimation = false;
+                
+                // Only perform zoom if enough time has passed since last zoom
+                if (currentTime - state[0].lastZoomTime >= zoomThrottleTime) {
+                    // Use a fixed zoom amount that's independent of triangle count
+                    // Base speed is 0.1 units per second
+                    float zoomAmount = 0.8 * (zoomThrottleTime / 1000.0);
+                    state[0].camDistance = min(state[0].camDistance + zoomAmount, maxCamDist);
+                    
+                    // Update last zoom time
+                    state[0].lastZoomTime = currentTime;
+                }
+                break;
+            case UI.LODShowcase:
+                state[0].activeShowcase = UI.LODShowcase;
+                state[0].rotationSpeed = initialRotationSpeed;
+                state[0].showLodAnimation = true;
+                break;
+            case UI.SimShowcase:
+                state[0].activeShowcase = UI.SimShowcase;
+                state[0].rotationSpeed = initialRotationSpeed * 0.1;
+                state[0].showLodAnimation = false;
+                state[0].camDistance = -1.3;
+                break;
+            case UI.GenShowcase:
+                state[0].activeShowcase = UI.GenShowcase;
+                state[0].camDistance = -1;
+                state[0].rotationSpeed = initialRotationSpeed * 0.1;
+                state[0].showLodAnimation = false;
+                break;
+            case UI.AddWater:
+                state[0].deleteWaterToggle = false;
+                break;
+            case UI.DeleteWater:
+                state[0].deleteWaterToggle = true;
+                break;
+        }
+    }
+
+    float3 color(uint2 fragCoord, uint2 pos, bool mouseDown) {
+        bool active = (id == UI.IncreaseZoom | id == UI.DecreaseZoom | id == state[0].activeShowcase);
+        active = id == UI.AddWater ? state[0].deleteWaterToggle == false : active;
+        active = id == UI.DeleteWater ? state[0].deleteWaterToggle == true : active;
+        
+        var baseColor = float3(0.9,0.9,1);
+        var inactiveColor = float3(0.55,0.55,0.65);
+
+        if (id == UI.AddWater){
+            baseColor = float3(0.6,0.7,1);
+            inactiveColor = float3(0.35,0.4,0.6);
+        }
+        if (id == UI.DeleteWater){
+            baseColor = float3(1,0.6,0.7);
+            inactiveColor = float3(0.5,0.3,0.4);
+        }
+
+        float3 color = active  ? baseColor : inactiveColor;
+
+        bool isBeingPressed = intersect(pos) && mouseDown;
+        float3 finalColor = isBeingPressed ? baseColor * float3(1.2,1.2,1.6) : color;
+        
+        bool isBlack = false;
+        
+        switch(id) {
+            case UI.AddWater:
+            case UI.IncreaseZoom:
+                isBlack = drawPlus(fragCoord);
+                break;
+            case UI.DecreaseZoom:
+                isBlack = drawMinus(fragCoord);
+                break;
+            case UI.LODShowcase:
+                isBlack = drawRomanI(fragCoord);
+                break;
+            case UI.SimShowcase:
+                isBlack = drawRomanII(fragCoord);
+                break;
+            case UI.GenShowcase:
+                isBlack = drawRomanIII(fragCoord);
+                break;
+            case UI.DeleteWater:
+                isBlack = drawX(fragCoord);
+                break;
+        }
+
+        return isBlack ? float3(0,0,0) : finalColor;
+    }
+};
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║ 🪐 Functions                                                                 ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+float getDeltaT(){
+    return deltaTMs[0] / 1000;
+}
+
 float hash(vec3 p3)
 {
     p3  = fract(p3 * .1031);
     p3 += dot(p3, p3.zyx + 31.32);
     return fract((p3.x + p3.y) * p3.z);
-}
-
-struct Tree {
-    TrisPtr ptr;
-    float3 pa;
-    float3 pb;
-    float ra;
-    float rb;
-    float scale;
-    
-    property bool isExampleTree {
-        get {
-            return ptr.idx == state[0].exampleTreeIdx;
-        }
-    }
-    
-    __init(TrisPtr tr, float _scale){
-        ptr = tr;
-        scale = _scale;
-        var trisAbc = ptr.tris.abc;
-        float3 vertA = vPos[trisAbc.x];
-        float3 vertB = vPos[trisAbc.y];
-        float3 vertC = vPos[trisAbc.z];
-
-        // Generate two random values using the hash function
-        float r1 = hash(vertA);
-        float r2 = hash(vertB);
-
-        // Convert random values to barycentric coordinates for uniform sampling
-        float u = 1.0 - sqrt(r1);
-        float v = sqrt(r1) * (1.0 - r2);
-        float w = sqrt(r1) * r2;
-
-        // Calculate the position of the tree based on barycentric coordinates
-        pa = u * vertA + v * vertB + w * vertC;
-        //pa = centerOfTris(tr);
-        pb = pa + normalize(pa) * 0.1 * scale;
-        ra = 0.03 * scale;
-        rb = 0.01 * scale;
-    }
-
-    __init(TrisPtr tr){
-        var trisAbc = tr.tris.abc;
-        float3 vertC = vPos[trisAbc.z];
-
-        float r3 = hash(vertC);
-        float scale = (r3/4)+0.3;
-
-        return Tree(tr, scale);
-    }
-    
-    property float3 treeColor {
-        get {
-            float3 baseColor = isExampleTree ? float3(1.0, 0.2, 0.2) : float3(0.4, 0.61, 0.42);
-            // Add slight variation based on position hash
-            float variation = 0.5 * (hash(pa) - 0.5); // range ~[-0.035, 0.035]
-            return baseColor + float3(variation, 0, 0);
-        }
-    }
-
-    // From https://iquilezles.org/articles/intersectors/
-    Optional<TrisAndDist> intersect(in vec3 ro, in vec3 rd)
-    {
-        vec3  ba = pb - pa;
-        vec3  oa = ro - pa;
-        vec3  ob = ro - pb;
-        float rr = ra - rb;
-        float m0 = dot(ba,ba);
-        float m1 = dot(ba,oa);
-        float m2 = dot(ba,rd);
-        float m3 = dot(rd,oa);
-        float m5 = dot(oa,oa);
-        float m6 = dot(ob,rd);
-        float m7 = dot(ob,ob);
-        
-        // body
-        float d2 = m0-rr*rr;
-        float k2 = d2    - m2*m2;
-        float k1 = d2*m3 - m1*m2 + m2*rr*ra;
-        float k0 = d2*m5 - m1*m1 + m1*rr*ra*2.0 - m0*ra*ra;
-        float h = k1*k1 - k0*k2;
-        if( h<0.0) return none;
-        float t = (-sqrt(h)-k1)/k2;
-    //if( t<0.0 ) return vec4(-1.0);
-        float y = m1 - ra*rr + t*m2;
-        if( y>0.0 && y<d2 ) return TrisAndDist(ptr,t,Object.Tree,normalize(d2*(oa+t*rd)-ba*y));
-        //if( y>0.0 && y<d2 ) return vec4(t, normalize(d2*(oa+t*rd)-ba*y));
-
-
-        // caps
-        float h1 = m3*m3 - m5 + ra*ra;
-        float h2 = m6*m6 - m7 + rb*rb;
-        if( max(h1,h2)<0.0 ) return none;
-        vec4 r = vec4(1e20);
-        if( h1>0.0 )
-        {        
-            t = -m3 - sqrt( h1 );
-            r = vec4( t, (oa+t*rd)/ra );
-        }
-        if( h2>0.0 )
-        {
-            t = -m6 - sqrt( h2 );
-            if( t<r.x )
-            r = vec4( t, (ob+t*rd)/rb );
-        }
-        return TrisAndDist(ptr,r.x,Object.Tree,r.yzw);
-    }
-}
-
-
-struct Atmosphere{
-    float3 origin;
-    float radius;
-
-    // From https://iquilezles.org/articles/intersectors/
-    Optional<TrisAndDist> intersectSphere(vec3 ro,vec3 rd)
-    {
-        vec3 oc = ro - origin;
-        float b = dot( oc, rd );
-        float c = dot( oc, oc ) - radius*radius;
-        float h = b*b - c;
-        if( h<0.0 ) return none;
-        var dist = -b - sqrt( h );
-        return TrisAndDist(TrisPtr(0),dist,Object.Atmosphere,sphNormal(ro + dist*rd));
-    }
-
-    // Modified from https://iquilezles.org/articles/intersectors/
-    Optional<TrisAndDist> intersect(vec3 ro, vec3 rd) {
-        vec3 oc = ro - origin; // Vector from the ray origin to the sphere center
-        oc = oc*0.95; //Show the circle a bit closer to the camera
-
-        float b = dot(oc, rd); // Dot product of oc and ray direction
-        if (b == 0.0) {
-            // The ray origin lies on the plane perpendicular to rd through the sphere center
-            return none;
-        }
-
-        float dist = -b / dot(rd, rd); // Solve for distance to intersection
-
-        if (dist < 0.0) {
-            // Intersection is behind the ray origin
-            return none;
-        }
-
-        return TrisAndDist(
-            TrisPtr(0), 
-            dist, 
-            Object.Atmosphere, 
-            sphNormal(ro + dist * rd)
-        );
-    }
-
-
-    vec3 sphNormal(vec3 hitPos)
-    {
-        return normalize(hitPos-origin);
-    }
-
-}
-
-struct SimValue {
-    float3 color;
-    TreePtr treePtr;
-    bool_w hasTree;
-    bool_w isSelected;
-    bool_w isPressed; //Mouse is touching down on it
-
-    property bool isWater {
-        get {
-            return isSelected == true;
-        }
-    }
-    
-    property float humidity {
-        get {                
-            // Get neighbors and calculate humidity based on water presence
-            float humidityValue = 0.0f;
-            TrisPtr ptr = TrisPtr(treePtr.idx);
-            TrisPtr[13] neighs;
-            ptr.getNeigths(neighs, ptr);
-            
-            // Sum up contributions from water tiles in neighborhood
-            for (var i = 0; i < neighs.getCount(); i++) {
-                if (neighs[i].tris.sim.isWater)
-                    humidityValue += 1.0f/13.0f;
-            }
-            
-            return humidityValue;
-        }
-    }
-    
-    // Terrain is a peak 1 or a valley -1
-    property float terrainFactor {
-        get {
-            TrisPtr ptr = TrisPtr(treePtr.idx);
-            
-            // Only calculate for detailed triangles
-            if (ptr.tris.lv < maxDivLevel) {
-                return 0.0f; // Neutral for non-detailed or if treePtr is not set for this SimValue context
-            }
-
-            float currentHeight = distance(ptr.center, float3(0));
-            
-            // Calculate the center of the three direct neighbors
-            float3 center_of_neighbors = (ptr.neigh_ab.center + ptr.neigh_bc.center + ptr.neigh_ca.center) / 3.0f;
-            float dist_neighbor_center = distance(center_of_neighbors, float3(0));
-            
-            // Calculate scaled difference: positive for peak-like, negative for valley-like
-            float height_difference = currentHeight - dist_neighbor_center;
-            float scaled_difference = height_difference * 400; // Using the 0.05 scaling factor
-            
-            // Clamp to the range [-1.0, 1.0]
-            return clamp(scaled_difference, -1.0f, 1.0f);
-        }
-    }
-}
-
-
-enum Edge
-{
-    ab,
-    bc,
-    ca
-}
-
-enum Subtris
-{
-    a,
-    b,
-    c
-}
-
-// MARK: test
-
-struct NeightsOthers
-{
-    const uint[] ab = { 2, 0, 2, 1, 2, 2, 1, 2, 1, 0, 2, 2, 2, 1, 2, 1, 0, 2, 2, 0 };
-    const uint[] bc = { 1, 1, 2, 1, 1, 0, 0, 2, 1, 1, 0, 1, 1, 1, 2, 0, 2, 0, 2, 0 };
-    const uint[] ca = { 1, 1, 2, 1, 2, 2, 1, 2, 1, 2, 2, 1, 1, 2, 2, 2, 1, 1, 1, 1 };
 }
 
 // Adds 3 vertices in the middle of the edges of the triangle
@@ -638,18 +916,6 @@ int3 add_middle_vertices(TrisPtr parent, int3 abc, TrisPtr divTris) {
 
     return v_idx;
 }
-
-struct Camera {
-     static float3 pos() {
-        // Animate Cam distance
-        float t = (sin(timeFromStart/2) + 1) * 0.5;
-        float animatedDist = lerp(minCamDist, maxCamDist, t);
-        if (state[0].showLodAnimation == 1){
-            state[0].camDistance = animatedDist;
-        }
-        return rotate(initialCameraPos+float3(0,0,state[0].camDistance),false);
-    }
-};
 
 TrisPtr chooseNeight(Edge edge, TrisPtr parent, Subtris subtris) {
     var divided = false;
@@ -813,38 +1079,6 @@ uint4 add_triangles(TrisPtr parent, int3 abc, int3 v_idx, TrisPtr divTris) {
     return t_idx;
 }
 
-// Fills buffer core vertices
-[playground::CALL(12,1,1)]
-[shader("compute")]
-[numthreads(12, 1, 1)]
-void initVerts(uint2 dispatchThreadId : SV_DispatchThreadID)
-{
-    //if (state[0].initialized == 1) return;
-    uint idx = dispatchThreadId.x;
-    if (idx >= initialNVerts)
-        return;
-    float3 coreVPos[12] = {
-        float3(-0.5257f, 0.0000f, 0.8507f),
-        float3( 0.5257f, 0.0000f, 0.8507f),
-        float3(-0.5257f, 0.0000f, -0.8507f),
-        float3( 0.5257f, 0.0000f, -0.8507f),
-        float3( 0.0000f, 0.8507f, 0.5257f),
-        float3( 0.0000f, 0.8507f, -0.5257f),
-        float3( 0.0000f, -0.8507f, 0.5257f),
-        float3( 0.0000f, -0.8507f, -0.5257f),
-        float3( 0.8507f, 0.5257f, 0.0000f),
-        float3(-0.8507f, 0.5257f, 0.0000f),
-        float3( 0.8507f, -0.5257f, 0.0000f),
-        float3(-0.8507f, -0.5257f, 0.0000f)
-    };
-    vPos[idx] = coreVPos[idx];
-
-    vPos[idx] = applyNoise(vPos[idx]);
-
-    state[0].nVerts = initialNVerts;
-    //cameraPos[0] = initalCameraPos;
-}
-
 
 float3 rotate(float3 initialRotation, bool inverted)
 {   
@@ -864,62 +1098,6 @@ float3 rotate(float3 initialRotation, bool inverted)
 }
 
 
-[playground::CALL::SIZE_OF("t")]
-[shader("compute")]
-[numthreads(20, 1, 1)]
-void initTris(uint2 dispatchThreadId : SV_DispatchThreadID)
-{
-    //if (state[0].initialized == 1) return;
-    uint idx = dispatchThreadId.x;
-    if (idx >= initialNTris) { 
-        // Reset triangle
-        t[idx].divided = false;
-        return;
-    }
-    int3 coreTAbc[20] = {
-        int3( 0,  4,  1),
-        int3( 0,  9,  4),
-        int3( 9,  5,  4),
-        int3( 4,  5,  8),
-        int3( 4,  8,  1),
-        int3( 8, 10,  1),
-        int3( 8,  3, 10),
-        int3( 5,  3,  8),
-        int3( 5,  2,  3),
-        int3( 2,  7,  3),
-        int3( 7, 10,  3),
-        int3( 7,  6, 10),
-        int3( 7, 11,  6),
-        int3(11,  0,  6),
-        int3( 0,  1,  6),
-        int3( 6,  1, 10),
-        int3( 9,  0, 11),
-        int3( 9, 11,  2),
-        int3( 9,  2,  5),
-        int3( 7,  2, 11)
-    };
-
-    TrisPtr[] tNeightAb = { 1, 16, 18, 2, 3, 6, 7, 8, 18, 19, 11, 12, 19, 16, 0, 14, 1, 16, 17, 9 };
-    TrisPtr[] tNeightBc = { 4, 2, 3, 7, 5, 15, 10, 6, 9, 10, 6, 15, 13, 14, 15, 5, 13, 19, 8, 17 };
-    TrisPtr[] tNeightCa = { 14, 0, 1, 4, 0, 4, 5, 3, 7, 8, 9, 10, 11, 12, 13, 11, 17, 18, 2, 12 };
-
-    t[idx].abc = coreTAbc[idx];
-    // Add an index for icosphere face
-    t[idx].ico_idx = idx;
-    // Mark tris to divide
-    t[idx].to_div = trisShouldBeDivided(trisAndDistFromCenter(TrisPtr(idx)));;
-
-    // Init neighbours
-    t[idx].neigh_ab = tNeightAb[idx];
-    t[idx].neigh_bc = tNeightBc[idx];
-    t[idx].neigh_ca = tNeightCa[idx];
-
-    // Init sim values
-    //TrisPtr(idx).updateSimValues();
-
-    state[0].nTris = initialNTris;
-    state[0].nTrisAdded = 20;
-}
 
 float3 applyNoise(float3 pos) {
     pos = normalize(pos);
@@ -1238,7 +1416,6 @@ TrisAndDist trisAndDistFromCenter(TrisPtr tr){
     return TrisAndDist(tr,dist);
 }
 
-// Main compute shader function
 void makeTris(uint2 dispatchThreadId : SV_DispatchThreadID)
 {
     uint idx = dispatchThreadId.x;
@@ -1306,6 +1483,113 @@ void increaseTris(uint2 dispatchThreadId : SV_DispatchThreadID){
     state[0].nTris += state[0].nTrisAdded*4;
     state[0].nVerts += state[0].nTrisAdded*3;
     state[0].nTrisAdded = state[0].nTrisAdded*4;
+}
+
+void createExampleTree() {
+    // Create a large example tree
+    TreePtr exampleTreePtr =  TreePtr(state[0].exampleTreeIdx);
+    trees[exampleTreePtr.idx] = Tree(TrisPtr(exampleTreePtr.idx), 1);
+    t[exampleTreePtr.idx].sim.treePtr = exampleTreePtr;
+    t[exampleTreePtr.idx].sim.hasTree = true;
+
+    // Mark it as the example tree
+    state[0].exampleTreeIdx = exampleTreePtr.idx;
+}
+
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║ 🪐 Compute Shaders                                                           ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
+
+
+// Fills buffer core vertices
+[playground::CALL(12,1,1)]
+[shader("compute")]
+[numthreads(12, 1, 1)]
+void initVerts(uint2 dispatchThreadId : SV_DispatchThreadID)
+{
+    //if (state[0].initialized == 1) return;
+    uint idx = dispatchThreadId.x;
+    if (idx >= initialNVerts)
+        return;
+    float3 coreVPos[12] = {
+        float3(-0.5257f, 0.0000f, 0.8507f),
+        float3( 0.5257f, 0.0000f, 0.8507f),
+        float3(-0.5257f, 0.0000f, -0.8507f),
+        float3( 0.5257f, 0.0000f, -0.8507f),
+        float3( 0.0000f, 0.8507f, 0.5257f),
+        float3( 0.0000f, 0.8507f, -0.5257f),
+        float3( 0.0000f, -0.8507f, 0.5257f),
+        float3( 0.0000f, -0.8507f, -0.5257f),
+        float3( 0.8507f, 0.5257f, 0.0000f),
+        float3(-0.8507f, 0.5257f, 0.0000f),
+        float3( 0.8507f, -0.5257f, 0.0000f),
+        float3(-0.8507f, -0.5257f, 0.0000f)
+    };
+    vPos[idx] = coreVPos[idx];
+
+    vPos[idx] = applyNoise(vPos[idx]);
+
+    state[0].nVerts = initialNVerts;
+    //cameraPos[0] = initalCameraPos;
+}
+
+
+[playground::CALL::SIZE_OF("t")]
+[shader("compute")]
+[numthreads(20, 1, 1)]
+void initTris(uint2 dispatchThreadId : SV_DispatchThreadID)
+{
+    //if (state[0].initialized == 1) return;
+    uint idx = dispatchThreadId.x;
+    if (idx >= initialNTris) { 
+        // Reset triangle
+        t[idx].divided = false;
+        return;
+    }
+    int3 coreTAbc[20] = {
+        int3( 0,  4,  1),
+        int3( 0,  9,  4),
+        int3( 9,  5,  4),
+        int3( 4,  5,  8),
+        int3( 4,  8,  1),
+        int3( 8, 10,  1),
+        int3( 8,  3, 10),
+        int3( 5,  3,  8),
+        int3( 5,  2,  3),
+        int3( 2,  7,  3),
+        int3( 7, 10,  3),
+        int3( 7,  6, 10),
+        int3( 7, 11,  6),
+        int3(11,  0,  6),
+        int3( 0,  1,  6),
+        int3( 6,  1, 10),
+        int3( 9,  0, 11),
+        int3( 9, 11,  2),
+        int3( 9,  2,  5),
+        int3( 7,  2, 11)
+    };
+
+    TrisPtr[] tNeightAb = { 1, 16, 18, 2, 3, 6, 7, 8, 18, 19, 11, 12, 19, 16, 0, 14, 1, 16, 17, 9 };
+    TrisPtr[] tNeightBc = { 4, 2, 3, 7, 5, 15, 10, 6, 9, 10, 6, 15, 13, 14, 15, 5, 13, 19, 8, 17 };
+    TrisPtr[] tNeightCa = { 14, 0, 1, 4, 0, 4, 5, 3, 7, 8, 9, 10, 11, 12, 13, 11, 17, 18, 2, 12 };
+
+    t[idx].abc = coreTAbc[idx];
+    // Add an index for icosphere face
+    t[idx].ico_idx = idx;
+    // Mark tris to divide
+    t[idx].to_div = trisShouldBeDivided(trisAndDistFromCenter(TrisPtr(idx)));;
+
+    // Init neighbours
+    t[idx].neigh_ab = tNeightAb[idx];
+    t[idx].neigh_bc = tNeightBc[idx];
+    t[idx].neigh_ca = tNeightCa[idx];
+
+    // Init sim values
+    //TrisPtr(idx).updateSimValues();
+
+    state[0].nTris = initialNTris;
+    state[0].nTrisAdded = 20;
 }
 
 [playground::CALL(1,1,1)]
@@ -1380,17 +1664,6 @@ void makeTris4(uint2 dispatchThreadId : SV_DispatchThreadID)
     makeTris(dispatchThreadId);
 }
 
-void createExampleTree() {
-    // Create a large example tree
-    TreePtr exampleTreePtr =  TreePtr(state[0].exampleTreeIdx);
-    trees[exampleTreePtr.idx] = Tree(TrisPtr(exampleTreePtr.idx), 1);
-    t[exampleTreePtr.idx].sim.treePtr = exampleTreePtr;
-    t[exampleTreePtr.idx].sim.hasTree = true;
-
-    // Mark it as the example tree
-    state[0].exampleTreeIdx = exampleTreePtr.idx;
-}
-
 [playground::CALL::SIZE_OF("t")]
 [shader("compute")]
 [numthreads(32, 1, 1)]
@@ -1425,257 +1698,6 @@ void updateTime(uint2 dispatchThreadId : SV_DispatchThreadID)
     rotationMs[0] = timeFromStart * 1000;
 }
 
-
-enum UI {
-    LODShowcase,
-    SimShowcase,
-    GenShowcase,
-    IncreaseZoom,
-    DecreaseZoom,
-    DeleteWater,
-    AddWater
-}
-
-struct Button {
-    uint2 bottomLeft;
-    uint size;
-    UI id;
-
-    bool intersect(uint2 pos) {
-        if (hidden)
-            return false;
-        int radius = 7;
-        if (pos.x >= bottomLeft.x + radius && pos.x <= bottomLeft.x + size - radius &&
-            pos.y >= bottomLeft.y && pos.y <= bottomLeft.y + size) {
-            return true;
-        }
-        
-        if (pos.y >= bottomLeft.y + radius && pos.y <= bottomLeft.y + size - radius &&
-            pos.x >= bottomLeft.x && pos.x <= bottomLeft.x + size) {
-            return true;
-        }
-
-        int2 cornerCenters[4] = {
-            {bottomLeft.x + radius, bottomLeft.y + radius},
-            {bottomLeft.x + size - radius, bottomLeft.y + radius}, 
-            {bottomLeft.x + radius, bottomLeft.y + size - radius},
-            {bottomLeft.x + size - radius, bottomLeft.y + size - radius}
-        };
-
-        for (int i = 0; i < 4; i++) {
-            int dx = pos.x - cornerCenters[i].x;
-            int dy = pos.y - cornerCenters[i].y;
-            if (dx * dx + dy * dy <= radius * radius) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    property bool hidden {
-        get {
-            switch (state[0].activeShowcase) {
-            case UI.SimShowcase:
-                return id == UI.DecreaseZoom || id == UI.IncreaseZoom;
-            default:
-                return id == UI.DeleteWater || id == UI.AddWater;
-            }
-        }
-    }
-
-    bool drawRectangle(uint2 fragCoord, uint2 offset, uint2 rectSize) {
-        return fragCoord.x >= bottomLeft.x + offset.x 
-            && fragCoord.y >= bottomLeft.y + offset.y
-            && fragCoord.x <= bottomLeft.x + offset.x + rectSize.x
-            && fragCoord.y <= bottomLeft.y + offset.y + rectSize.y;
-    }
-
-    bool drawPlus(uint2 fragCoord) {
-        const uint padding = 8;
-        const uint thickness = 7;
-        // Horizontal bar
-        if (drawRectangle(fragCoord, uint2(padding, size/2 - thickness/2), uint2(size-2*padding, thickness))) return true;
-        // Vertical bar
-        if (drawRectangle(fragCoord, uint2(size/2 - thickness/2, padding), uint2(thickness, size-2*padding))) return true;
-        return false;
-    }
-
-    bool drawX(uint2 fragCoord) {
-        const uint padding = 6;
-        const uint thickness = 9;
-        
-        // Convert to local coordinates
-        float2 local = float2(fragCoord - bottomLeft);
-        local -= float2(size/2); // Center at origin
-        
-        // Rotate coordinates by +45 and -45 degrees
-        float angle = 0.785398; // 45 degrees in radians
-        float2x2 rotPos = float2x2(
-            cos(angle), -sin(angle),
-            sin(angle), cos(angle)
-        );
-        float2x2 rotNeg = float2x2(
-            cos(-angle), -sin(-angle),
-            sin(-angle), cos(-angle)
-        );
-        
-        float2 rot1 = mul(rotPos, local);
-        float2 rot2 = mul(rotNeg, local);
-        
-        // Check if point is within either rotated rectangle
-        float halfLength = (size - 2*padding) / 2;
-        bool inRect1 = abs(rot1.x) < halfLength && abs(rot1.y) < thickness/2;
-        bool inRect2 = abs(rot2.x) < halfLength && abs(rot2.y) < thickness/2;
-        
-        return inRect1 || inRect2;
-    }
-
-    bool drawMinus(uint2 fragCoord) {
-        const uint padding = 8;
-        const uint thickness = 7;
-        // Horizontal bar only
-        return drawRectangle(fragCoord, uint2(padding, size/2 - thickness/2), uint2(size-2*padding, thickness));
-    }
-
-    bool drawRomanI(uint2 fragCoord) {
-        const uint padding = 12;
-        const uint thickness = 7;
-        return drawRectangle(fragCoord, uint2(size/2 - thickness/2, padding), uint2(thickness, size-2*padding));
-    }
-
-    bool drawRomanII(uint2 fragCoord) {
-        const uint padding = 12;
-        const uint thickness = 7;
-        const uint spacing = 10;
-        if (drawRectangle(fragCoord, uint2(size/2 - spacing - thickness/2, padding), uint2(thickness, size-2*padding))) return true;
-        if (drawRectangle(fragCoord, uint2(size/2 + spacing - thickness/2, padding), uint2(thickness, size-2*padding))) return true;
-        return false;
-    }
-
-    bool drawRomanIII(uint2 fragCoord) {
-        const uint padding = 12;
-        const uint thickness = 7;
-        const uint spacing = 10;
-        if (drawRectangle(fragCoord, uint2(size/2 - spacing*1.5 - thickness/2, padding), uint2(thickness, size-2*padding))) return true;
-        if (drawRectangle(fragCoord, uint2(size/2 - thickness/2, padding), uint2(thickness, size-2*padding))) return true;
-        if (drawRectangle(fragCoord, uint2(size/2 + spacing*1.5 - thickness/2, padding), uint2(thickness, size-2*padding))) return true;
-        return false;
-    }
-
-    void onPress() {
-        state[0].stopClickEvent = true;
-        
-        // Current time in milliseconds
-        float currentTime = timeFromStart * 1000.0;
-        
-        // Minimum time between zoom operations (in milliseconds)
-        const float zoomThrottleTime = 16.0; // ~60fps rate
-        
-        switch (id) {
-            case UI.IncreaseZoom:
-                state[0].showLodAnimation = false;
-                
-                // Only perform zoom if enough time has passed since last zoom
-                if (currentTime - state[0].lastZoomTime >= zoomThrottleTime) {
-                    // Use a fixed zoom amount that's independent of triangle count
-                    // Base speed is 0.1 units per second
-                    float zoomAmount = 0.8 * (zoomThrottleTime / 1000.0); 
-                    state[0].camDistance = max(state[0].camDistance - zoomAmount, minCamDist);
-                    
-                    // Update last zoom time
-                    state[0].lastZoomTime = currentTime;
-                }
-                break;
-            case UI.DecreaseZoom:
-                state[0].showLodAnimation = false;
-                
-                // Only perform zoom if enough time has passed since last zoom
-                if (currentTime - state[0].lastZoomTime >= zoomThrottleTime) {
-                    // Use a fixed zoom amount that's independent of triangle count
-                    // Base speed is 0.1 units per second
-                    float zoomAmount = 0.8 * (zoomThrottleTime / 1000.0);
-                    state[0].camDistance = min(state[0].camDistance + zoomAmount, maxCamDist);
-                    
-                    // Update last zoom time
-                    state[0].lastZoomTime = currentTime;
-                }
-                break;
-            case UI.LODShowcase:
-                state[0].activeShowcase = UI.LODShowcase;
-                state[0].rotationSpeed = initialRotationSpeed;
-                state[0].showLodAnimation = true;
-                break;
-            case UI.SimShowcase:
-                state[0].activeShowcase = UI.SimShowcase;
-                state[0].rotationSpeed = initialRotationSpeed * 0.1;
-                state[0].showLodAnimation = false;
-                state[0].camDistance = -1.3;
-                break;
-            case UI.GenShowcase:
-                state[0].activeShowcase = UI.GenShowcase;
-                state[0].camDistance = -1;
-                state[0].rotationSpeed = initialRotationSpeed * 0.1;
-                state[0].showLodAnimation = false;
-                break;
-            case UI.AddWater:
-                state[0].deleteWaterToggle = false;
-                break;
-            case UI.DeleteWater:
-                state[0].deleteWaterToggle = true;
-                break;
-        }
-    }
-
-    float3 color(uint2 fragCoord, uint2 pos, bool mouseDown) {
-        bool active = (id == UI.IncreaseZoom | id == UI.DecreaseZoom | id == state[0].activeShowcase);
-        active = id == UI.AddWater ? state[0].deleteWaterToggle == false : active;
-        active = id == UI.DeleteWater ? state[0].deleteWaterToggle == true : active;
-        
-        var baseColor = float3(0.9,0.9,1);
-        var inactiveColor = float3(0.55,0.55,0.65);
-
-        if (id == UI.AddWater){
-            baseColor = float3(0.6,0.7,1);
-            inactiveColor = float3(0.35,0.4,0.6);
-        }
-        if (id == UI.DeleteWater){
-            baseColor = float3(1,0.6,0.7);
-            inactiveColor = float3(0.5,0.3,0.4);
-        }
-
-        float3 color = active  ? baseColor : inactiveColor;
-
-        bool isBeingPressed = intersect(pos) && mouseDown;
-        float3 finalColor = isBeingPressed ? baseColor * float3(1.2,1.2,1.6) : color;
-        
-        bool isBlack = false;
-        
-        switch(id) {
-            case UI.AddWater:
-            case UI.IncreaseZoom:
-                isBlack = drawPlus(fragCoord);
-                break;
-            case UI.DecreaseZoom:
-                isBlack = drawMinus(fragCoord);
-                break;
-            case UI.LODShowcase:
-                isBlack = drawRomanI(fragCoord);
-                break;
-            case UI.SimShowcase:
-                isBlack = drawRomanII(fragCoord);
-                break;
-            case UI.GenShowcase:
-                isBlack = drawRomanIII(fragCoord);
-                break;
-            case UI.DeleteWater:
-                isBlack = drawX(fragCoord);
-                break;
-        }
-
-        return isBlack ? float3(0,0,0) : finalColor;
-    }
-};
-
 Optional<Button> UIintersect(uint2 pos, int2 screenSize)
 {   
     const uint size = 55;
@@ -1699,6 +1721,10 @@ Optional<Button> UIintersect(uint2 pos, int2 screenSize)
 
     return none;
 }
+
+// ╔══════════════════════════════════════════════════════════════════════════════╗
+// ║ 🪐 Main                                                                      ║
+// ╚══════════════════════════════════════════════════════════════════════════════╝
 
 //https://www.shadertoy.com/view/4d2XWV
 float4 imageMain(uint2 dispatchThreadID, int2 screenSize)
