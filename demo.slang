@@ -330,13 +330,12 @@ struct Tris {
         return TrisAndDist(ptr,t);
     }
 
-    void updateSimValues(){
-        bool trisInitialized = sim.hasTree == true;
-
-        t[ptr.idx].sim.color = getColor();
-        if (trisInitialized)
-            return;
+    void updateSimValues() {
         // Set colors
+        t[ptr.idx].sim.color = getColor();
+
+        if (sim.isInitialized == true)
+            return;
 
         bool hasDetailedLod = lv >= maxDivLevel;
         bool isValley = distance(center,float3(0)) < radius*1;
@@ -348,7 +347,7 @@ struct Tris {
         
         trees[ptr.idx] = Tree(ptr,0);
         t[ptr.idx].sim.treePtr = TreePtr(ptr.idx);
-        t[ptr.idx].sim.hasTree = true;
+        t[ptr.idx].sim.isInitialized = true;
     }
 
     float3 getColor() {
@@ -479,8 +478,9 @@ struct Tree {
     property float3 treeColor {
         get {
             float3 baseColor = isExampleTree ? float3(1.0, 0.2, 0.2) : float3(0.4, 0.61, 0.42);
+            baseColor = baseColor * 0.8; // Darken the base color for trees
             // Add slight variation based on position hash
-            float variation = 0.5 * (hash(pa) - 0.5); // range ~[-0.035, 0.035]
+            float variation = 0.3 * (hash(pa) - 0.5); // range ~[-0.035, 0.035]
             return baseColor + float3(variation, 0, 0);
         }
     }
@@ -510,7 +510,7 @@ struct Tree {
         float t = (-sqrt(h)-k1)/k2;
     //if( t<0.0 ) return vec4(-1.0);
         float y = m1 - ra*rr + t*m2;
-        if( y>0.0 && y<d2 ) return TrisAndDist(ptr,t,Object.Tree,normalize(d2*(oa+t*rd)-ba*y));
+        if( y>0.0 && y<d2 ) return TrisAndDist(ptr,t,normalize(d2*(oa+t*rd)-ba*y),Object.Tree);
         //if( y>0.0 && y<d2 ) return vec4(t, normalize(d2*(oa+t*rd)-ba*y));
 
 
@@ -530,7 +530,7 @@ struct Tree {
             if( t<r.x )
             r = vec4( t, (ob+t*rd)/rb );
         }
-        return TrisAndDist(ptr,r.x,Object.Tree,r.yzw);
+        return TrisAndDist(ptr,r.x,r.yzw,Object.Tree);
     }
 }
 
@@ -547,7 +547,7 @@ struct Atmosphere{
         float h = b*b - c;
         if( h<0.0 ) return none;
         var dist = -b - sqrt( h );
-        return TrisAndDist(TrisPtr(0),dist,Object.Atmosphere,sphNormal(ro + dist*rd));
+        return TrisAndDist(TrisPtr(0),dist,sphNormal(ro + dist*rd),Object.Atmosphere);
     }
 
     // Modified from https://iquilezles.org/articles/intersectors/
@@ -571,8 +571,8 @@ struct Atmosphere{
         return TrisAndDist(
             TrisPtr(0), 
             dist, 
-            Object.Atmosphere, 
-            sphNormal(ro + dist * rd)
+            sphNormal(ro + dist * rd),
+            Object.Atmosphere
         );
     }
 
@@ -587,8 +587,14 @@ struct Atmosphere{
 struct SimValue {
     float3 color;
     TreePtr treePtr;
-    bool_w hasTree;
+    bool_w isInitialized;
     bool_w hasWater;
+
+    property bool hasTree {
+        get {
+            return treePtr.tree.scale > 0.0f;
+        }
+    }
     
     property float humidity {
         get {                
@@ -1234,7 +1240,7 @@ struct TrisAndDist {
     TrisPtr ptr;
     float dist;
     Object object;
-    float3 norm;
+    float3 _hitNormal;
 
     __init(TrisPtr tptr, float tdist){
         ptr = tptr;
@@ -1242,11 +1248,11 @@ struct TrisAndDist {
         object = Object.Tris;
     }
 
-    __init(TrisPtr tptr, float tdist, Object tisTree, float3 tnorm){
+    __init(TrisPtr tptr, float tdist, float3 hitNormal, Object hitObject) {
         ptr = tptr;
         dist = tdist;
-        object = tisTree;
-        norm = tnorm;
+        _hitNormal = hitNormal;
+        object = hitObject;
     }
 
     float3 hitPos(float3 ro, float3 rd){
@@ -1256,6 +1262,14 @@ struct TrisAndDist {
     property Tris tris {
         get {
             return ptr.tris;
+        }
+    }
+
+    property float3 hitNormal {
+        get {
+            if (object == Object.Tris) {
+                return tris.normal;
+            } else return _hitNormal;
         }
     }
 }
@@ -1326,6 +1340,8 @@ Optional<TrisAndDist> refineNearestFromNeigh(TrisAndDist minTris, vec3 ro, vec3 
             if (!minTrisAndDist.hasValue || minTrisAndDist.hasValue && trisAndDist.value.dist < minTrisAndDist.value.dist)
                 minTrisAndDist = trisAndDist.value;
         }
+
+        // 
         if (neighs[i].tris.sim.hasTree) {
             trisAndDist = neighs[i].tris.sim.treePtr.tree.intersect(ro,rd);
             if (trisAndDist.hasValue){
@@ -1350,7 +1366,7 @@ Optional<TrisAndDist> icoIntersect(float3 ro, float3 rd)
     var atmHitPos = atmIntersect.value.hitPos(ro,rd);
 
     Optional<TrisAndDist> minTris = none;
-    TrisAndDist minAtmoTris = TrisAndDist(TrisPtr(0),distance(TrisPtr(0).tris.center,atmHitPos));;
+    TrisAndDist minAtmoTris = TrisAndDist(TrisPtr(0),distance(TrisPtr(0).tris.center,atmHitPos));
 
     // Find best starting tris using distance
     //[ForceUnroll]
@@ -1506,7 +1522,6 @@ void createExampleTree() {
     TreePtr exampleTreePtr =  TreePtr(state[0].exampleTreeIdx);
     trees[exampleTreePtr.idx] = Tree(TrisPtr(exampleTreePtr.idx), 1);
     t[exampleTreePtr.idx].sim.treePtr = exampleTreePtr;
-    t[exampleTreePtr.idx].sim.hasTree = true;
 
     // Mark it as the example tree
     state[0].exampleTreeIdx = exampleTreePtr.idx;
@@ -1601,7 +1616,7 @@ void initTris(uint2 dispatchThreadId : SV_DispatchThreadID)
     t[idx].neigh_ca = tNeightCa[idx];
 
     // Init sim values
-    //TrisPtr(idx).updateSimValues();
+    // TrisPtr(idx).tris.updateSimValues();
 
     state[0].nTris = initialNTris;
     state[0].nTrisAdded = 20;
@@ -1794,10 +1809,10 @@ float4 imageMain(uint2 dispatchThreadID, int2 screenSize)
         float t1 = triAndD.dist;
         vec3 pos = ro + t1*rd;
         
-        var nor = triAndD.tris.normal;
+        float lightIntensity = clamp( (dot(triAndD.hitNormal,lig)+1)/2, 0.3, 1.0 );   
         switch (triAndD.object){
             case Object.Tris:
-                col = triAndD.tris.sim.color * clamp( (dot(nor,lig)+1)/2, 0, 1.0 );
+                col = triAndD.tris.sim.color;
                 
                 // Add a subtle shimmer effect to water
                 if (triAndD.tris.sim.hasWater) {
@@ -1807,24 +1822,27 @@ float4 imageMain(uint2 dispatchThreadID, int2 screenSize)
                     
                     // Add a subtle specular highlight
                     float3 halfVec = normalize(lig + normalize(ro - pos));
-                    float spec = pow(max(0.0, dot(nor, halfVec)), 32.0) * 0.5;
+                    float spec = pow(max(0.0, dot(triAndD.hitNormal, halfVec)), 32.0) * 0.5;
                     col += float3(0.3, 0.4, 0.5) * spec;
                 }
                 break;
             case Object.Tree:
                 // Get the tree color
-                if (triAndD.tris.sim.hasTree) {
-                    float3 treeCol = triAndD.ptr.tris.sim.treePtr.tree.treeColor;
-                    col = treeCol * 0.4 * clamp( (dot(triAndD.norm,lig)+1)/2, 0, 1.0 );
-                } else {
-                    col = vec3(0.4, 0.61, 0.42) * 0.4 * clamp( (dot(triAndD.norm,lig)+1)/2, 0, 1.0 );
-                }
+                col = triAndD.ptr.tris.sim.treePtr.tree.treeColor;
+                // Tree are in shadow if the light is behind them
+                // Smoothly mix between shadow and sunny intensity
+                float shadowLightIntensity = clamp( (dot(triAndD.tris.normal,lig)+1)/2, 0.3, 1.0 );
+                float sunnyLightIntensity = lightIntensity;
+                
+                float dotProduct = dot(triAndD.tris.normal, lig);
+                float mixFactor = smoothstep(-0.2, 0.1, dotProduct);
+                lightIntensity = lerp(shadowLightIntensity, sunnyLightIntensity, mixFactor);
                 break;
             case Object.Atmosphere:
-                var norm = clamp( (dot(triAndD.norm,lig)+1)/2, 0, 1.0 );
-                col = vec3(0.1,0.1,0.2)*3*norm;
+                col = vec3(0.1,0.1,0.2)*3;
             default:
         }
+        col = col * lightIntensity;
 	}
 
     return vec4( col, 1.0 );
