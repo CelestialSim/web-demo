@@ -168,6 +168,16 @@ struct State {
             }
         }
     }
+
+    static float3 cameraPos() {
+        // Animate Cam distance
+        float t = (sin(timeFromStart/2) + 1) * 0.5;
+        float animatedDist = lerp(minCamDist, maxCamDist, t);
+        if (state[0].showLodAnimation == 1){
+            state[0].camDistance = animatedDist;
+        }
+        return rotate(initialCameraPos+float3(0,0,state[0].camDistance),false);
+    }
 }
 
 // This helps with performance since we are not passing the whole tris stuct but only a pointer
@@ -236,6 +246,12 @@ struct Tris {
     TrisPtr center_t;
     uint8_w lv;
     SimValue sim;
+
+    // This represents what side of each triangle faces the other
+    // ab[1] = 0 means the edge ab of triangle 1 is facing the ab edge of another triangle
+    static const uint[] ab = { 2, 0, 2, 1, 2, 2, 1, 2, 1, 0, 2, 2, 2, 1, 2, 1, 0, 2, 2, 0 };
+    static const uint[] bc = { 1, 1, 2, 1, 1, 0, 0, 2, 1, 1, 0, 1, 1, 1, 2, 0, 2, 0, 2, 0 };
+    static const uint[] ca = { 1, 1, 2, 1, 2, 2, 1, 2, 1, 2, 2, 1, 1, 2, 2, 2, 1, 1, 1, 1 };
 
     property bool isPressed {
         get {
@@ -423,7 +439,6 @@ struct Tris {
         
         return combinedSim;
     }
-
 }
 
 struct Tree {
@@ -638,25 +653,6 @@ struct SimValue {
             return clamp(scaled_difference, -1.0f, 1.0f);
         }
     }
-}
-
-struct Camera {
-    static float3 pos() {
-       // Animate Cam distance
-       float t = (sin(timeFromStart/2) + 1) * 0.5;
-       float animatedDist = lerp(minCamDist, maxCamDist, t);
-       if (state[0].showLodAnimation == 1){
-           state[0].camDistance = animatedDist;
-       }
-       return rotate(initialCameraPos+float3(0,0,state[0].camDistance),false);
-   }
-}
-
-struct NeightsOthers
-{
-    const uint[] ab = { 2, 0, 2, 1, 2, 2, 1, 2, 1, 0, 2, 2, 2, 1, 2, 1, 0, 2, 2, 0 };
-    const uint[] bc = { 1, 1, 2, 1, 1, 0, 0, 2, 1, 1, 0, 1, 1, 1, 2, 0, 2, 0, 2, 0 };
-    const uint[] ca = { 1, 1, 2, 1, 2, 2, 1, 2, 1, 2, 2, 1, 1, 2, 2, 2, 1, 1, 1, 1 };
 }
 
 struct Button {
@@ -956,13 +952,12 @@ TrisPtr chooseNeight(Edge edge, TrisPtr parent, Subtris subtris) {
     if (divided) {
         var neighOrientationOffset = 0;
         if (parent.tris.ico_idx != neight_idx.tris.ico_idx) {
-            var other = NeightsOthers();
             if(edge == Edge.ab) {
-                neighOrientationOffset = other.ab[parent.tris.ico_idx];
+                neighOrientationOffset = Tris.ab[parent.tris.ico_idx];
             } else if(edge == Edge.bc) {
-                neighOrientationOffset = other.bc[parent.tris.ico_idx];
+                neighOrientationOffset = Tris.bc[parent.tris.ico_idx];
             } else {
-                neighOrientationOffset = other.ca[parent.tris.ico_idx];
+                neighOrientationOffset = Tris.ca[parent.tris.ico_idx];
             }
         }
 
@@ -1370,7 +1365,7 @@ Optional<TrisAndDist> icoIntersect(float3 ro, float3 rd)
 
     // Find best starting tris using distance
     //[ForceUnroll]
-    const float3 cameraPos = normalize(Camera.pos());
+    const float3 cameraPos = normalize(State.cameraPos());
     for (int i = 20; i < 100; i++) {
         bool forwardFacing = dot(t[i].normal,cameraPos) > 0;
         if (forwardFacing){
@@ -1445,7 +1440,7 @@ Optional<TrisAndDist> icoIntersect(float3 ro, float3 rd)
 }
 
 TrisAndDist trisAndDistFromCenter(TrisPtr tr){
-    var dist = distance(tr.tris.center,Camera.pos());
+    var dist = distance(tr.tris.center,State.cameraPos());
     return TrisAndDist(tr,dist);
 }
 
@@ -1784,7 +1779,7 @@ float4 imageMain(uint2 dispatchThreadID, int2 screenSize)
     vec2 iResolution = screenSize;
 	vec2 p = (2.0*fragCoord.xy-iResolution.xy) / iResolution.y;
     
-	vec3 ro = Camera.pos();
+	vec3 ro = State.cameraPos();
 	vec3 rd = normalize( vec3(p,-2.0) );
     rd = rotate(rd,false);
 
