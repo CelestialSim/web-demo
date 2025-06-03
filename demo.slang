@@ -60,7 +60,7 @@ static const bool activateNoise = true; //Default: true
 static const float max_tri_size = 0.26;  //Default: 0.3
 static const float radius = 1;
 [playground::MOUSE_POSITION]
-uniform float4 mousePosition;
+uniform float4 _mousePosition;
 
 // ╔══════════════════════════════════════════════════════════════════════════════╗
 // ║ 🪐 Buffers                                                                   ║
@@ -148,10 +148,24 @@ struct State {
     UI activeShowcase;
     bool_w showLodAnimation;
     TrisPtr _pressedTris;
-    bool_w stopClickEvent; // Buttons do not pass click on planet
     bool_w deleteWaterToggle;
     float lastZoomTime; // Timestamp of last zoom operation
     uint exampleTreeIdx; // Index of the example tree in GenShowcase mode (0 means no example tree)
+    uint2 screenSize;
+
+    property bool mouseDown {
+        get {
+            // Check if mouse is pressed and within the planet area
+            return _mousePosition.z < 0.0;
+        }
+    } 
+    property uint2 mousePos {
+        get {
+            uint2 mousePos = _mousePosition.xy;
+            mousePos.y = state[0].screenSize.y - mousePos.y;
+            return mousePos;
+        }
+    } 
 
     // Needed Optionals can't be stored in a Buffer in webGPU
     property Optional<TrisPtr> pressedTris {
@@ -782,8 +796,6 @@ struct Button {
     }
 
     void onPress() {
-        state[0].stopClickEvent = true;
-        
         // Current time in milliseconds
         float currentTime = timeFromStart * 1000.0;
         
@@ -798,7 +810,7 @@ struct Button {
                 if (currentTime - state[0].lastZoomTime >= zoomThrottleTime) {
                     // Use a fixed zoom amount that's independent of triangle count
                     // Base speed is 0.1 units per second
-                    float zoomAmount = 0.8 * (zoomThrottleTime / 1000.0); 
+                    float zoomAmount = 1.5 * (zoomThrottleTime / 1000.0); 
                     state[0].camDistance = max(state[0].camDistance - zoomAmount, minCamDist);
                     
                     // Update last zoom time
@@ -812,7 +824,7 @@ struct Button {
                 if (currentTime - state[0].lastZoomTime >= zoomThrottleTime) {
                     // Use a fixed zoom amount that's independent of triangle count
                     // Base speed is 0.1 units per second
-                    float zoomAmount = 0.8 * (zoomThrottleTime / 1000.0);
+                    float zoomAmount = 1.5 * (zoomThrottleTime / 1000.0);
                     state[0].camDistance = min(state[0].camDistance + zoomAmount, maxCamDist);
                     
                     // Update last zoom time
@@ -995,10 +1007,7 @@ Optional<TrisPtr> getClickedTris(vec3 ro, vec3 rd){
     return none;
 }
 
-void handleClick(vec3 ro, vec3 rd, bool mouseDown) {
-    if (state[0].stopClickEvent == true)
-        return;
-
+void handlePlanetClick(vec3 ro, vec3 rd, bool mouseDown) {
     // Handle GenShowcase mode clicks
     if (state[0].activeShowcase == UI.GenShowcase) {
         if (mouseDown) {
@@ -1722,6 +1731,30 @@ void updateTime(uint2 dispatchThreadId : SV_DispatchThreadID)
     rotationMs[0] = timeFromStart * 1000;
 }
 
+[playground::CALL(1,1,1)]
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void mouseClick(uint2 dispatchThreadId : SV_DispatchThreadID)
+{   
+    if (dispatchThreadId.x > 0) return;
+    
+    Optional<Button> mouseElement = none;
+    if (state[0].mouseDown) {
+        let mouseUI = UIintersect(state[0].mousePos,state[0].screenSize);
+        if (mouseUI.hasValue) {
+            mouseUI.value.onPress();
+            return;
+        }
+    }
+    vec3 ro = State.cameraPos();
+    vec2 iResolution = state[0].screenSize;
+    vec2 p1 = (2.0*state[0].mousePos.xy-iResolution.xy) / iResolution.y;
+    vec3 rd1 = normalize(vec3(p1,-2.0));
+    rd1 = rotate(rd1,false);
+    handlePlanetClick(ro, rd1, state[0].mouseDown);
+}
+
+
 Optional<Button> UIintersect(uint2 pos, int2 screenSize)
 {   
     const uint size = 55;
@@ -1753,26 +1786,11 @@ Optional<Button> UIintersect(uint2 pos, int2 screenSize)
 //https://www.shadertoy.com/view/4d2XWV
 float4 imageMain(uint2 dispatchThreadID, int2 screenSize)
 {
-    //state[0].stopClickEvent = false;
-    bool rightSize = mousePosition.x > screenSize.x/2;
-
+    state[0].screenSize = screenSize;
     uint2 fragCoord = dispatchThreadID;
 
-    uint2 mousePos1 = mousePosition.xy;
-    mousePos1.y = screenSize.y - mousePos1.y;
-    bool mouseDown = mousePosition.z < 0;
-    Optional<Button> mouseElement = none;
-    let mouseUI = UIintersect(mousePos1,screenSize);
-    if (mouseDown && mouseUI.hasValue) {
-        state[0].stopClickEvent = true;
-        mouseUI.value.onPress();
-    }
-    else {
-            state[0].stopClickEvent = false;
-    }
-
     if (let uiElem = UIintersect(fragCoord,screenSize)){
-        vec4 col = vec4(uiElem.color(fragCoord,mousePos1,mouseDown),1);
+        vec4 col = vec4(uiElem.color(fragCoord,state[0].mousePos,state[0].mouseDown),1);
         return col;
     }
 
@@ -1782,19 +1800,10 @@ float4 imageMain(uint2 dispatchThreadID, int2 screenSize)
 	vec3 ro = State.cameraPos();
 	vec3 rd = normalize( vec3(p,-2.0) );
     rd = rotate(rd,false);
-
 	
     // sphere animation
     vec3 lig = rotate(normalize( vec3(0.6,0.3,0.4) ),false);
     vec3 col = vec3(0.0);
-    
-    uint2 mousePos = mousePosition.xy;
-    mousePos.y = screenSize.y - mousePos.y;
-
-    vec2 p1 = (2.0*mousePos.xy-iResolution.xy) / iResolution.y;
-    vec3 rd1 = normalize(vec3(p1,-2.0));
-    rd1 = rotate(rd1,false);
-    handleClick(ro, rd1, mouseDown);
 
     float2 screnCenter = screenSize/2;
 
