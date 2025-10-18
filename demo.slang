@@ -15,6 +15,8 @@
 
 
 import playground;
+import rendering;
+
 
 // ╔══════════════════════════════════════════════════════════════════════════════╗
 // ║ 🪐 Aliases                                                                   ║
@@ -1784,70 +1786,75 @@ Optional<Button> UIintersect(uint2 pos, int2 screenSize)
 // ╚══════════════════════════════════════════════════════════════════════════════╝
 
 //https://www.shadertoy.com/view/4d2XWV
-float4 imageMain(uint2 dispatchThreadID, int2 screenSize)
+[shader("compute")]
+[numthreads(16, 16, 1)]
+[playground::CALL::SIZE_OF("outputTexture")]
+void imageMain(uint2 dispatchThreadID: SV_DispatchThreadID)
 {
-    state[0].screenSize = screenSize;
-    uint2 fragCoord = dispatchThreadID;
+    drawPixel(dispatchThreadID, (int2 screenSize) => {
+        state[0].screenSize = screenSize;
+        uint2 fragCoord = dispatchThreadID;
 
-    if (let uiElem = UIintersect(fragCoord,screenSize)){
-        vec4 col = vec4(uiElem.color(fragCoord,state[0].mousePos,state[0].mouseDown),1);
-        return col;
-    }
-
-    vec2 iResolution = screenSize;
-	vec2 p = (2.0*fragCoord.xy-iResolution.xy) / iResolution.y;
-    
-	vec3 ro = State.cameraPos();
-	vec3 rd = normalize( vec3(p,-2.0) );
-    rd = rotate(rd,false);
-	
-    // sphere animation
-    vec3 lig = rotate(normalize( vec3(0.6,0.3,0.4) ),false);
-    vec3 col = vec3(0.0);
-
-    float2 screnCenter = screenSize/2;
-
-    Optional<TrisAndDist> triAndDO = icoIntersect( ro, rd );    
-    if(let triAndD = triAndDO)
-    {
-        float t1 = triAndD.dist;
-        vec3 pos = ro + t1*rd;
-        
-        float lightIntensity = clamp( (dot(triAndD.hitNormal,lig)+1)/2, 0.3, 1.0 );   
-        switch (triAndD.object){
-            case Object.Tris:
-                col = triAndD.tris.sim.color;
-                
-                // Add a subtle shimmer effect to water
-                if (triAndD.tris.sim.hasWater) {
-                    // Add time-based shimmer using sine waves
-                    float shimmer = 0.1 * sin(timeFromStart * 3.0 + dot(pos, float3(1.0, 2.0, 3.0)) * 5.0);
-                    col += float3(0.05, 0.1, 0.15) * shimmer;
-                    
-                    // Add a subtle specular highlight
-                    float3 halfVec = normalize(lig + normalize(ro - pos));
-                    float spec = pow(max(0.0, dot(triAndD.hitNormal, halfVec)), 32.0) * 0.5;
-                    col += float3(0.3, 0.4, 0.5) * spec;
-                }
-                break;
-            case Object.Tree:
-                // Get the tree color
-                col = triAndD.ptr.tris.sim.treePtr.tree.treeColor;
-                // Tree are in shadow if the light is behind them
-                // Smoothly mix between shadow and sunny intensity
-                float shadowLightIntensity = clamp( (dot(triAndD.tris.normal,lig)+1)/2, 0.3, 1.0 );
-                float sunnyLightIntensity = lightIntensity;
-                
-                float dotProduct = dot(triAndD.tris.normal, lig);
-                float mixFactor = smoothstep(-0.2, 0.1, dotProduct);
-                lightIntensity = lerp(shadowLightIntensity, sunnyLightIntensity, mixFactor);
-                break;
-            case Object.Atmosphere:
-                col = vec3(0.1,0.1,0.2)*3;
-            default:
+        if (let uiElem = UIintersect(fragCoord,screenSize)){
+            vec4 col = vec4(uiElem.color(fragCoord,state[0].mousePos,state[0].mouseDown),1);
+            return col;
         }
-        col = col * lightIntensity;
-	}
 
-    return vec4( col, 1.0 );
+        vec2 iResolution = screenSize;
+        vec2 p = (2.0*fragCoord.xy-iResolution.xy) / iResolution.y;
+        
+        vec3 ro = State.cameraPos();
+        vec3 rd = normalize( vec3(p,-2.0) );
+        rd = rotate(rd,false);
+        
+        // sphere animation
+        vec3 lig = rotate(normalize( vec3(0.6,0.3,0.4) ),false);
+        vec3 col = vec3(0.0);
+
+        float2 screnCenter = screenSize/2;
+
+        Optional<TrisAndDist> triAndDO = icoIntersect( ro, rd );    
+        if(let triAndD = triAndDO)
+        {
+            float t1 = triAndD.dist;
+            vec3 pos = ro + t1*rd;
+            
+            float lightIntensity = clamp( (dot(triAndD.hitNormal,lig)+1)/2, 0.3, 1.0 );   
+            switch (triAndD.object){
+                case Object.Tris:
+                    col = triAndD.tris.sim.color;
+                    
+                    // Add a subtle shimmer effect to water
+                    if (triAndD.tris.sim.hasWater) {
+                        // Add time-based shimmer using sine waves
+                        float shimmer = 0.1 * sin(timeFromStart * 3.0 + dot(pos, float3(1.0, 2.0, 3.0)) * 5.0);
+                        col += float3(0.05, 0.1, 0.15) * shimmer;
+                        
+                        // Add a subtle specular highlight
+                        float3 halfVec = normalize(lig + normalize(ro - pos));
+                        float spec = pow(max(0.0, dot(triAndD.hitNormal, halfVec)), 32.0) * 0.5;
+                        col += float3(0.3, 0.4, 0.5) * spec;
+                    }
+                    break;
+                case Object.Tree:
+                    // Get the tree color
+                    col = triAndD.ptr.tris.sim.treePtr.tree.treeColor;
+                    // Tree are in shadow if the light is behind them
+                    // Smoothly mix between shadow and sunny intensity
+                    float shadowLightIntensity = clamp( (dot(triAndD.tris.normal,lig)+1)/2, 0.3, 1.0 );
+                    float sunnyLightIntensity = lightIntensity;
+                    
+                    float dotProduct = dot(triAndD.tris.normal, lig);
+                    float mixFactor = smoothstep(-0.2, 0.1, dotProduct);
+                    lightIntensity = lerp(shadowLightIntensity, sunnyLightIntensity, mixFactor);
+                    break;
+                case Object.Atmosphere:
+                    col = vec3(0.1,0.1,0.2)*3;
+                default:
+            }
+            col = col * lightIntensity;
+        }
+
+        return vec4( col, 1.0 );
+    });
 }
