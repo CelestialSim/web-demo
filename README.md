@@ -1,4 +1,4 @@
-# CelesialSim Demo: Interartive planet simulation
+# CelesialSim Demo: Interactive planet simulation
 
 A demo for https://celestialsim.github.io/, a procedural generation toolkit for Godot.
 
