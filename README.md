@@ -1,27 +1,11 @@
-# 🌟 Welcome to CelestialSim Web Demo! 🌟
+# CelesialSim Demo: Interartive planet simulation
 
-## 🚀 Ready to explore the cosmos? Follow these simple steps:
+A demo for https://celestialsim.github.io/, a procedural generation toolkit for Godot.
 
-### 📍 Step 1: Visit our website
-🔗 Go to: https://celestialsim.github.io/?highlight=copyBtn#demo
+A buffer of trianges renders with ray intersection, the number of ray intersections were reduced with a tree structure. leaves = visible tris, node children = subdivided triangles of the node.
 
-### 📋 Step 2: Copy the demo code
-💡 Look for the "Copy Demo Code" button and click it!
+## View the demo at https://compute.toys/view/3159
 
-### 📝 Step 3: Paste it at the bottom
-✨ Paste the code at the bottom of this welcome message
-
-### ▶️ Step 4: Hit the Run button
-🎉 Watch your celestial simulation come to life!
-
-## 🪐 Features:
-
-🌍 Interactive planet rendering with visual effects powered by Slang  
-🔍 Mode I: LOD System - Press 'I' to explore, use +/- to zoom and see detail levels  
-💧 Mode II: Water Placement - Click planet to add water, red button to remove water  
-🌳 Mode III: Tree Spawning - Click to place example tree, others spawn in similar terrain
-
-## 💫 Have fun!
-
-Try to edit the code and post the screenshots on the discord channel  
-https://discord.gg/bfCcWkstRB 🚀✨
+---
+### Old method, no longer needed
+If you want to use [Slang Playground](https://shader-slang.org/slang-playground/) copy the code from https://github.com/CelestialSim/web-demo/blob/main/demo.slang and paste it in the website
